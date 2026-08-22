@@ -1,0 +1,283 @@
+# HDU 图书馆座位自动抢座
+
+基于 NestJS 的杭电图书馆座位自动预约系统，通过 CAS 统一认证登录，支持多账号管理，在放号时间点自动抢座。
+
+## 已实现功能
+
+- **多账号管理**：前端添加/删除/强制重登账号，添加时即时 CAS 验证（密码错误不入库）；密码 AES-256-GCM 加密入库，密钥来自环境变量；按 4 账号并发抢座设计（`concurrency=8`，未做账号数硬上限校验）
+- **CAS 统一认证登录**：通过学校 SSO 自动登录（AES-128-ECB 加密密码），每个账号各自维持独立登录态（会话注册表 + 每账号独立登录锁），心跳每账号 5 分钟错峰检测保活
+- **抢座任务管理**：REST API 创建、查询、终止抢座任务；同账号新任务覆盖旧 pending 任务；同账号已有 running 任务时拒绝创建；跨账号座位偏好重合给出软警告
+- **定时抢座调度**：BullMQ 延迟队列，在指定时间点精准触发；**放号前 5 分钟自动执行 session-precheck，无条件刷新该账号登录态**（失败推送 `session_precheck_failed` 通知，不取消主任务）
+- **自动抢座执行**：searchSeats 获取座位 → 按优先级选座（偏好 > 推荐 > 任意）→ bookSeats 提交预约；支持 **strictMode 严格模式**（只抢偏好座位，不降级）
+- **两段式重试**：时间窗口驱动（3 分钟窗口，以 triggerAt 为绝对锚点）——唤醒后前 15 秒高频探测（1 秒/轮），之后低频（3 秒/轮）；座位被占自动换座重试并实时提醒；限流错误单独退避 3 秒；未知错误限 2 次；黑名单/参数错误等不可恢复错误立即终止
+- **实时提醒**：偏好座位被占时发 `seat_taken` 通知并写入任务结果（`result.takenSeats`），前端轮询实时可见
+- **任务终止**：pending 阶段从队列移除、running 阶段协作式退出，均标记 `cancelled`
+- **模拟通知**：抢座结果写数据库 + 控制台日志（前端轮询查询）
+- **前端页面**：单页表单提交抢座任务 + 实时轮询任务状态 + 账号管理区块（状态徽标、30 秒轮询刷新）
+
+## 未实现 / 待完成
+
+- **微信小程序订阅消息推送**：接口已预留（`INotificationService`），`NotificationModule` 当前仅注入 `MockNotificationService`，WeChat 实现待后续接入
+- **鉴权系统**：账号与任务通过前端统一管理，无用户注册/登录/权限控制
+- **账号数硬上限**：计划目标为最多 4 个账号，代码未实现数量校验（并发余量已按 4 账号设计）
+
+## 技术栈
+
+- **后端**：NestJS + TypeORM + MySQL + Redis (BullMQ)
+- **前端**：React + Vite + TypeScript
+- **基础设施**：全部容器化（Docker Compose：MySQL + Redis + 后端 + 前端 nginx）
+
+## 前置要求
+
+**方式一（推荐）：Docker 一键启动**
+
+- 仅需安装 [Docker Desktop](https://www.docker.com/products/docker-desktop/)，无需本地安装 Node.js / MySQL / Redis
+
+**方式二：本地开发模式**
+
+- Node.js 18+ + Docker Desktop（MySQL/Redis 容器仍由 Compose 提供）
+
+## 环境配置
+
+推荐直接运行初始化脚本生成 `.env`（自动填入随机 `ACCOUNT_SECRET_KEY` 与 `DB_PASSWORD`），再按需修改：
+
+```bash
+./scripts/init-env.ps1        # Windows PowerShell
+# sh scripts/init-env.sh      # macOS / Linux
+```
+
+也可以手动复制 `.env.example` 为 `.env` 并修改，完整字段如下：
+
+```bash
+# 应用
+PORT=3000
+NODE_ENV=development
+
+# MySQL（以下为本地开发模式默认值；容器化部署时 DB_HOST/DB_PORT/DB_USERNAME 由 compose 覆盖）
+DB_HOST=localhost
+DB_PORT=3306
+DB_USERNAME=root
+DB_PASSWORD=<建议 init-env 脚本生成或自设，容器部署时与 MySQL 容器共用>
+DB_DATABASE=library_seat
+
+# Redis（同上，容器化部署时 REDIS_HOST/REDIS_PORT 由 compose 覆盖）
+REDIS_HOST=localhost
+REDIS_PORT=6379
+REDIS_PASSWORD=
+
+# BullMQ
+BULLMQ_PREFIX=library-seat
+
+# 通知模式（当前仅 mock 可用）
+NOTIFY_MODE=mock
+
+# 图书馆 API 基地址
+LIBRARY_API_BASE_URL=https://hdu.huitu.zhishulib.com
+
+# 账号密码加密密钥（必填，AES-256-GCM 32 字节）
+# 未配置或格式错误时应用启动直接终止（fail-fast）
+# 生成方式: 运行 init-env 脚本自动生成，或 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+ACCOUNT_SECRET_KEY=<64位hex或base64>
+
+# CAS 统一认证登录凭据（可选，仅当 accounts 表为空时自动种子一条账号，属迁移兼容项）
+CAS_USERNAME=你的学号
+CAS_PASSWORD=你的密码
+CAS_SERVICE=https://hdu.huitu.zhishulib.com/User/Index/hduCASLogin?forward=%2FSpace%2FCategory%2Flist%3Fcategory_id%3D591
+```
+
+> 账号现在通过前端「账号管理」区块添加（即时 CAS 验证后加密入库）。`CAS_USERNAME/CAS_PASSWORD` 只在首次启动且 accounts 表为空时起种子作用。
+
+## 系统流程
+
+```
+前端「账号管理」添加账号（即时 CAS 验证，成功后加密入库）
+       │
+用户提交抢座任务（前端表单，绑定 accountId）
+       │
+       ▼
+  POST /grab-tasks 创建任务（状态: pending）
+  ├─ 同账号已有 pending → 旧任务标记 failed（被新任务覆盖）
+  ├─ 同账号已有 running → 拒绝创建
+  └─ 跨账号同触发日任务偏好座位重合 → 响应带 warnings 提示
+       │
+       ▼
+  TaskScheduler 计算延迟，推入 BullMQ 延迟队列（每个任务两个 job）
+       │
+       ├─（triggerAt 前 5 分钟）session-precheck
+       │    └─ 无条件 refreshSession(该账号)，失败推 session_precheck_failed 通知
+       │
+       ▼（到达 triggerAt 时间点）
+  grab-seat job 唤醒 → GrabSeatProcessor → GrabSeatWorker.executeGrab()
+       │
+       ▼
+  1. 通知：任务开始
+  2. 状态更新为 running
+  3. 时间窗口驱动的重试循环（3 分钟窗口，锚定 triggerAt）：
+       │  高频段（前 15 秒）：1 秒/轮；低频段：3 秒/轮；限流退避 3 秒
+       │
+       ├─ searchSeats（获取最新座位快照）
+       ├─ 按优先级筛选候选座位（偏好 > 推荐 > 任意；strictMode 只取偏好）
+       ├─ 依次尝试 bookSeats
+       │    ├─ 成功 → 标记 success + 通知
+       │    ├─ 座位被占 → seat_taken 实时提醒 + 换下一个候选座位
+       │    ├─ 登录态失效 → 只重登该账号后重试
+       │    ├─ 未知错误 → 重试 2 次后终止
+       │    └─ 黑名单/不可恢复 → 标记 failed + 通知
+       └─ 循环期间可随时被用户终止（协作式退出，标记 cancelled）
+```
+
+## 快速开始
+
+### 方式一：Docker 一键启动（推荐）
+
+全新电脑 clone 仓库后只需两步（无需本地安装 Node.js / MySQL / Redis）：
+
+```powershell
+# 1. 一次性初始化：生成 .env（随机 ACCOUNT_SECRET_KEY 与 DB_PASSWORD，不进 git）
+./scripts/init-env.ps1        # Windows PowerShell
+# sh scripts/init-env.sh      # macOS / Linux
+
+# 2. 构建并启动全部四个服务（MySQL + Redis + 后端 + 前端）
+docker compose up -d --build
+```
+
+验证就绪（四个服务全部 `healthy`/`running`）：
+
+```bash
+docker compose ps
+```
+
+- 前端访问：http://localhost:18080（端口取自 `.env` 的 `FRONTEND_PORT`；API 经 nginx 同源反代，无需关心后端端口）
+- 手机远程访问：手机与电脑连同一 Wi-Fi，访问 `http://<电脑局域网IP>:18080`（Windows 首次需在防火墙放行对应端口）
+- 端口占用说明：整套服务只占用宿主机 `FRONTEND_PORT` 一个端口，MySQL/Redis/后端均走 Docker 内网——适合部署到与他人共用的服务器；若该端口被占，改 `.env` 里的 `FRONTEND_PORT` 即可
+- 首次启动因拉取镜像 + 安装依赖需数分钟；之后重启只需 `docker compose up -d`，通常 30 秒内就绪
+- 数据持久化在 `mysql-data` / `redis-data` 两个 Docker 卷中，`docker compose down` 不会丢数据（`down -v` 才会删除卷，慎用）
+
+> `.env` 由初始化脚本生成后，CAS 凭据等其余配置可随时编辑 `.env` 补充，然后 `docker compose up -d` 重建后端生效。
+
+### 方式二：本地开发模式（热重载）
+
+#### 1. 启动基础设施
+
+MySQL 与 Redis 由容器提供，需叠加开发覆盖文件以发布本机回环端口供直连（基础 compose 不在宿主机绑定 3306/6379，以适配共享服务器部署）：
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mysql redis
+```
+
+数据库 `library_seat` 由 MySQL 容器自动创建，表结构在后端首次启动时自动同步（TypeORM synchronize）。
+
+#### 2. 安装依赖
+
+```bash
+# 后端依赖
+npm install
+
+# 前端依赖
+cd frontend
+npm install
+cd ..
+```
+
+#### 3. 启动后端
+
+```bash
+# 开发模式（热重载）
+npm run start:dev
+```
+
+启动过程注意观察控制台输出，**CAS 登录发生在 HTTP 监听之前**：
+
+1. **加密自检**：`ACCOUNT_SECRET_KEY` 未配置或格式错误 → 启动立即终止（fail-fast），按提示配置后重启。
+2. **CAS 登录**：逐个串行登录 accounts 表中全部 ACTIVE 账号（间隔约 1 秒错峰），成功打印 `初始化登录成功: <学号>`，失败打印 `初始化登录失败: ...`（单个失败不阻塞启动）。
+3. **HTTP 监听**：最后看到 `Nest application successfully started`，后端在 `http://localhost:3000` 就绪，此时可启动前端。
+
+> 如果 CAS 登录失败（网络不通或账号密码错误），后端服务本身仍能正常启动，只是涉及抢座的接口会因缺少登录态而失败。可稍后在前端「账号管理」点「刷新登录」，或排查后重启后端重新触发登录（心跳每 5 分钟也会自动检测并重试）。
+
+#### 4. 启动前端
+
+```bash
+cd frontend
+npm run dev
+```
+
+前端默认运行在 `http://localhost:5173`。
+
+#### 5. 首次使用流程
+
+1. 配置 `.env`（尤其 `ACCOUNT_SECRET_KEY`），启动后端与前端
+2. 前端展开「账号管理」→ 输入学号 + 密码 →「添加并验证」（CAS 登录需数秒，失败会显示具体原因）
+3. 主表单选择账号，填写预约日期、时间段、座位偏好（逗号分隔）、触发时间，按需勾选严格模式
+4. 提交任务后前端每 2 秒轮询任务状态；放号前 5 分钟系统自动刷新登录态，到点自动抢座
+5. 进行中可随时点「终止抢座」
+
+## 项目结构
+
+```
+.
+├── src/
+│   ├── cas/                          # CAS 统一认证登录（AES-128-ECB 加密 + Cookie 管理）
+│   ├── common/
+│   │   ├── constants/                # API 端点常量
+│   │   └── utils/                    # 时间窗口计算、form-urlencoded 编码、AES-256-GCM 加密
+│   ├── config/                       # 环境变量配置映射
+│   ├── modules/
+│   │   ├── account/                  # 账号管理（Entity/Service/Controller，即时 CAS 验证）
+│   │   ├── hdu-library/              # 图书馆 API 客户端（searchSeats/bookSeats，按账号取凭证）
+│   │   │   ├── dto/                  # 请求/响应 DTO
+│   │   │   └── errors/               # 错误分类与重试判断
+│   │   ├── grab-task/                # 抢座任务 CRUD（Entity/Service/Controller）
+│   │   ├── scheduler/                # BullMQ 延迟队列调度（主任务 + session-precheck）
+│   │   ├── queue/                    # BullMQ 队列处理器（GrabSeatProcessor，concurrency=8）
+│   │   ├── grab-seat/                # 抢座执行核心（Worker + 选座策略）
+│   │   ├── session/                  # 多账号登录态保活（会话注册表 + 心跳错峰 + 自动重登）
+│   │   ├── notification/             # 通知服务（接口 + Mock 实现）
+│   │   └── grab-attempt-log/         # 抢座尝试日志（含耗时埋点）
+│   └── main.ts                       # 应用入口
+├── frontend/
+│   └── src/
+│       ├── api/                      # 后端 API 调用（grabTasks + accounts）
+│       ├── config/                   # 自习室配置
+│       ├── hooks/                    # 轮询任务状态 Hook
+│       └── utils/                    # 时间工具
+├── scripts/                          # 一次性脚本（登录验证/API 探测/init-env 初始化等）
+├── Dockerfile                        # 后端镜像（多阶段构建）
+├── frontend/Dockerfile               # 前端镜像（vite build + nginx）
+├── docker-compose.yml                # MySQL + Redis + 后端 + 前端 四服务编排
+├── .env                              # 环境变量（init-env 脚本生成，不进 git）
+└── README.md
+```
+
+## API 接口
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/accounts` | 添加账号（`{username, password}`，即时 CAS 验证后入库） |
+| GET | `/accounts` | 账号列表 + 最近登录态（永不返回密码） |
+| POST | `/accounts/:id/refresh` | 强制重新登录 |
+| DELETE | `/accounts/:id` | 删除账号（有进行中任务时拒绝） |
+| POST | `/grab-tasks` | 创建抢座任务（绑定 accountId） |
+| GET | `/grab-tasks?accountId=xxx` | 查询该账号的所有任务 |
+| GET | `/grab-tasks/:id` | 查询单个任务状态 |
+| DELETE | `/grab-tasks/:id` | 终止任务（pending 移除队列 / running 协作式退出） |
+
+## Docker 常用命令
+
+```bash
+docker compose up -d --build   # 构建并启动全部四个服务
+docker compose up -d           # 启动（镜像已构建时，秒级完成）
+docker compose ps              # 查看状态（healthy 即就绪）
+docker compose logs -f backend # 跟踪后端日志（Ctrl+C 退出）
+docker compose restart backend # 重启单个服务
+docker compose down            # 停止全部服务（数据卷保留）
+```
+
+## 注意事项
+
+- 开发环境下 TypeORM 开启了 `synchronize: true`，会自动同步表结构，**生产环境请关闭**
+- `NOTIFY_MODE` 当前仅支持 `mock`，微信推送尚未实现
+- `ACCOUNT_SECRET_KEY` 是账号密码的加密密钥，**切勿泄露或提交到版本控制**；一旦更换，已入库的账号密码将无法解密（需删除后重新添加）
+- `.env` 中的凭据配置同样**切勿提交到版本控制**
+- 目前前端仅配置了「二楼东」自习室，其他自习室的 `roomId`/`categoryId` 需抓包确认后补充到 `frontend/src/config/rooms.ts`
+- 错误分类的关键词匹配基于有限样本，实际运行时可能遇到未分类的错误文案落入 `UNKNOWN` 类别（限制重试 2 次后终止）
+- 图书馆侧限流按账号还是按 IP 计算属前提假设（`scripts/phase2.5-concurrent-experiment.ts` 为双账号并发验证脚本），多账号并发时注意观察限流错误码

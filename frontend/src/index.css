@@ -1,0 +1,505 @@
+/* ============================================================
+   图书馆抢座 · 全局样式（极简 / Apple 质感）
+   设计基调：纯白背景、系统字体、柔和灰阶、大圆角、克制的蓝色点缀
+   ============================================================ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: #ffffff;
+  color: #1d1d1f;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue",
+    Arial, sans-serif;
+  font-size: 15px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+::selection {
+  background-color: rgba(0, 122, 255, 0.18);
+}
+
+/* ---------------- 页面骨架 ---------------- */
+
+.page {
+  max-width: 680px;
+  margin: 0 auto;
+  padding: 56px 24px 96px;
+}
+
+.page-header {
+  margin-bottom: 32px;
+}
+
+.page-title {
+  margin: 0;
+  font-size: 30px;
+  line-height: 1.25;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.page-subtitle {
+  margin: 6px 0 0;
+  font-size: 14px;
+  color: #86868b;
+}
+
+/* ---------------- 卡片 ---------------- */
+
+.card {
+  background-color: #ffffff;
+  border: 1px solid #e8e8ed;
+  border-radius: 16px;
+  padding: 20px 22px;
+  margin-bottom: 16px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.card-title {
+  margin: 0 0 14px;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.hint {
+  margin: 2px 0 0;
+  font-size: 14px;
+  color: #86868b;
+}
+
+/* ---------------- 表单 ---------------- */
+
+.field-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px 16px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.field > label {
+  margin-bottom: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #6e6e73;
+}
+
+.input {
+  width: 100%;
+  padding: 9px 12px;
+  font-family: inherit;
+  font-size: 15px;
+  line-height: 1.4;
+  color: #1d1d1f;
+  background-color: #ffffff;
+  border: 1px solid #d2d2d7;
+  border-radius: 10px;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.input::placeholder {
+  color: #a1a1a6;
+}
+
+.input:hover {
+  border-color: #b6b6bd;
+}
+
+.input:focus {
+  border-color: #007aff;
+  box-shadow: 0 0 0 3.5px rgba(0, 122, 255, 0.16);
+}
+
+select.input {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 36px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8' fill='none'%3E%3Cpath d='M1 1.5L6 6.5L11 1.5' stroke='%2386868b' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  cursor: pointer;
+}
+
+.time-range {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.time-range .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.time-range-sep {
+  flex: none;
+  font-size: 14px;
+  color: #86868b;
+}
+
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex: none;
+  accent-color: #007aff;
+  cursor: pointer;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 18px;
+  font-size: 14px;
+  cursor: pointer;
+  user-select: none;
+}
+
+/* ---------------- 账号选择 ---------------- */
+
+.account-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.account-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid #e8e8ed;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.account-row:hover {
+  background-color: #fafafc;
+}
+
+.account-row.selected {
+  border-color: rgba(0, 122, 255, 0.45);
+  background-color: rgba(0, 122, 255, 0.04);
+}
+
+.account-row input[type="checkbox"] {
+  margin-top: 4px;
+}
+
+.account-row-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.account-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.account-name {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.badge {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.seat-pref-input {
+  margin-top: 10px;
+}
+
+/* ---------------- 批量座位偏好 ---------------- */
+
+.bulk-box {
+  padding: 14px 16px;
+  margin-bottom: 16px;
+  background-color: #f5f5f7;
+  border-radius: 12px;
+}
+
+.bulk-box > label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #6e6e73;
+}
+
+.bulk-box-row {
+  display: flex;
+  gap: 8px;
+}
+
+.bulk-box-row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------------- 按钮 ---------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  padding: 9px 20px;
+  border: none;
+  border-radius: 980px;
+  font-family: inherit;
+  font-size: 14.5px;
+  font-weight: 500;
+  line-height: 1.35;
+  cursor: pointer;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  transition: background-color 0.18s ease, opacity 0.18s ease,
+    transform 0.12s ease;
+}
+
+.btn:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3.5px rgba(0, 122, 255, 0.25);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn-primary {
+  background-color: #007aff;
+  color: #ffffff;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background-color: #006ee6;
+}
+
+.btn-secondary {
+  background-color: #e8e8ed;
+  color: #1d1d1f;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background-color: #dcdce2;
+}
+
+.btn-danger {
+  background-color: rgba(255, 59, 48, 0.1);
+  color: #d70015;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background-color: rgba(255, 59, 48, 0.16);
+}
+
+.btn-danger:focus-visible {
+  box-shadow: 0 0 0 3.5px rgba(255, 59, 48, 0.18);
+}
+
+.btn-block {
+  width: 100%;
+  padding: 11px 20px;
+  font-size: 15px;
+}
+
+.btn-small {
+  padding: 5px 14px;
+  font-size: 13px;
+}
+
+.actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 4px 0;
+}
+
+/* ---------------- 提示信息 ---------------- */
+
+.msg {
+  margin: 12px 0 0;
+  font-size: 14px;
+  white-space: pre-wrap;
+}
+
+.msg-info {
+  color: #6e6e73;
+}
+
+/* ---------------- 任务状态 ---------------- */
+
+.status-section .status-card:last-child {
+  margin-bottom: 0;
+}
+
+.status-card {
+  padding: 10px 14px;
+  margin-bottom: 8px;
+  font-size: 14px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+}
+
+.status-card strong {
+  font-weight: 600;
+}
+
+.status-card-idle {
+  background-color: #f5f5f7;
+  color: #1d1d1f;
+}
+
+.status-card-running {
+  background-color: #eff5ff;
+  border-color: #d9e6fb;
+  color: #1d1d1f;
+}
+
+.status-card-success {
+  background-color: #ecf9f1;
+  border-color: #d3efde;
+  color: #1a7f37;
+}
+
+.status-card-failed,
+.status-card-error {
+  background-color: #feeff0;
+  border-color: #f9d8da;
+  color: #d70015;
+}
+
+.status-card-cancelled {
+  background-color: #f5f5f7;
+  border-color: #e8e8ed;
+  color: #6e6e73;
+}
+
+.status-taken {
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: #b45309;
+}
+
+/* ---------------- 账号管理 ---------------- */
+
+.divider {
+  border: none;
+  border-top: 1px solid #e8e8ed;
+  margin: 32px 0 20px;
+}
+
+.manage-panel {
+  margin-top: 16px;
+}
+
+.account-manage-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.account-manage-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border: 1px solid #e8e8ed;
+  border-radius: 12px;
+}
+
+.account-manage-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.account-meta {
+  font-size: 12.5px;
+  color: #86868b;
+}
+
+.account-manage-actions {
+  display: flex;
+  gap: 8px;
+  flex: none;
+}
+
+.add-account-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.add-account-row .input {
+  flex: 1;
+  min-width: 0;
+}
+
+/* ---------------- 响应式与无障碍 ---------------- */
+
+@media (max-width: 560px) {
+  .page {
+    padding: 36px 16px 72px;
+  }
+
+  .page-title {
+    font-size: 26px;
+  }
+
+  .field-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .add-account-row {
+    flex-wrap: wrap;
+  }
+
+  .add-account-row .btn {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+  }
+}

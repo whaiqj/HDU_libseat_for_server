@@ -1,0 +1,14 @@
+# 本地开发模式（README 方式二）专用覆盖文件，须显式 -f 引用才会生效：
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d mysql redis
+# 作用：为 MySQL/Redis 发布本机回环端口，供宿主机上 npm run start:dev 直连（.env 的 localhost）
+# 注意：刻意不命名为 docker-compose.override.yml（该文件会被 docker compose up 自动合并），
+# 服务器部署（README 方式一）不带 -f 引用本文件，因此不会在宿主机绑定 3306/6379，
+# 与共享服务器上其他租户的服务不会产生端口冲突
+services:
+  mysql:
+    ports:
+      - "127.0.0.1:3306:3306"
+
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"

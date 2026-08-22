@@ -1,0 +1,12 @@
+node_modules
+dist
+coverage
+*.log
+# 防止本地 VITE_API_BASE_URL 被打进生产产物（容器内走 nginx 同源反代）
+.env
+.env.*
+# 测试文件不进生产镜像（避免 tsc 全量编译 spec 时的 Node 全局变量报错）
+**/*.spec.ts
+**/*.spec.tsx
+src/test
+tsconfig.tsbuildinfo

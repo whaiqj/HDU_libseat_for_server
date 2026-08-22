@@ -1,0 +1,74 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: library-seat-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-library_seat_dev}
+      MYSQL_DATABASE: ${DB_DATABASE:-library_seat}
+    # 不发布宿主机端口：后端经 Docker 内网 mysql:3306 访问，避免与共享服务器上其他服务冲突
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: library-seat-redis
+    restart: unless-stopped
+    # 不发布宿主机端口：后端经 Docker 内网 redis:6379 访问
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build: .
+    container_name: library-seat-backend
+    restart: unless-stopped
+    # .env 由 scripts/init-env.ps1（Windows）/ scripts/init-env.sh（macOS/Linux）生成
+    # 文件缺失时 compose 会直接报错，避免密钥不明来源地"默认值"启动
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USERNAME: root
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # GET / 为后端根路由，连接成功即视为存活
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:3000/').then(()=>process.exit(0)).catch(()=>process.exit(1))\""]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 40s
+
+  frontend:
+    build: ./frontend
+    container_name: library-seat-frontend
+    restart: unless-stopped
+    # 对外端口必须显式配置（.env 的 FRONTEND_PORT）：共享服务器上无法保证任何默认端口可用，
+    # 漏配时直接报错终止，而不是启动后才暴露端口冲突
+    ports:
+      - "${FRONTEND_PORT:?FRONTEND_PORT 未设置，请在 .env 中配置}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  mysql-data:
+  redis-data:
