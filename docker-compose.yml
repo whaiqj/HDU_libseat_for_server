@@ -44,6 +44,12 @@ services:
       DB_USERNAME: root
       REDIS_HOST: redis
       REDIS_PORT: "6379"
+    # sso.hdu.edu.cn 为分域 DNS：校园网内解析为内网地址(192.168.101.252)，公网解析为 218.75.123.164。
+    # 容器内解析结果与宿主机不一致（可能拿到 IPv6 或内网地址，两者在容器网络中均不可达），
+    # 导致 CAS 登录 10s 连接超时；此处钉住已验证可达的公网 IP。
+    # 学校若更换 IP（查法：nslookup sso.hdu.edu.cn 223.5.5.5），需同步更新此处。
+    extra_hosts:
+      - "sso.hdu.edu.cn:218.75.123.164"
     depends_on:
       mysql:
         condition: service_healthy
@@ -61,14 +67,36 @@ services:
     build: ./frontend
     container_name: library-seat-frontend
     restart: unless-stopped
-    # 对外端口必须显式配置（.env 的 FRONTEND_PORT）：共享服务器上无法保证任何默认端口可用，
-    # 漏配时直接报错终止，而不是启动后才暴露端口冲突
-    ports:
-      - "${FRONTEND_PORT:?FRONTEND_PORT 未设置，请在 .env 中配置}:80"
+    # 不发布宿主机端口：对外入口统一收口到 caddy，避免绕过 Basic Auth 直连 nginx/后端
     depends_on:
       backend:
         condition: service_healthy
 
+  # 对外唯一入口：Basic Auth 鉴权后转发 frontend 容器
+  caddy:
+    image: caddy:2-alpine
+    container_name: library-seat-caddy
+    restart: unless-stopped
+    # 对外端口必须显式配置（.env 的 FRONTEND_PORT）：共享服务器上无法保证任何默认端口可用，
+    # 漏配时直接报错终止，而不是启动后才暴露端口冲突
+    ports:
+      - "${FRONTEND_PORT:?FRONTEND_PORT 未设置，请在 .env 中配置}:80"
+    environment:
+      # Basic Auth 凭据（浏览器弹窗的用户名 + 密码 bcrypt 哈希），生成方式见 .env.example
+      # 漏配时直接报错终止，避免无鉴权地暴露到公网
+      BASIC_AUTH_USER: ${BASIC_AUTH_USER:?BASIC_AUTH_USER 未设置，请在 .env 中配置}
+      BASIC_AUTH_HASH: ${BASIC_AUTH_HASH:?BASIC_AUTH_HASH 未设置，请在 .env 中配置}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # 证书持久化：将来配域名启用 HTTPS 时必须保留，否则容器重建会丢失已签发证书
+      # （Let's Encrypt 有速率限制，频繁重新签发会被临时封禁）
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - frontend
+
 volumes:
   mysql-data:
   redis-data:
+  caddy-data:
+  caddy-config:
