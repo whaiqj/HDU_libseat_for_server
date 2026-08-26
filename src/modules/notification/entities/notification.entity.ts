@@ -7,7 +7,12 @@ import {
 
 /** 通知类型 */
 export type NotificationType =
-  'grab_success' | 'grab_failed' | 'grab_started' | 'seat_taken' | 'session_precheck_failed';
+  | 'grab_success'
+  | 'grab_failed'
+  | 'grab_started'
+  | 'seat_taken'
+  | 'session_precheck_failed'
+  | 'preparse_warning';
 
 /**
  * 通知记录表

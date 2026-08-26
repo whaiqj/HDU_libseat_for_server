@@ -1,12 +1,13 @@
 # 对外唯一入口：Basic Auth 鉴权后转发 frontend 容器
-# 凭据从环境变量注入（BASIC_AUTH_USER / BASIC_AUTH_HASH，见 .env），
-# Caddyfile 本身不含秘密，可安全提交进 git
+# 凭据放在 auth.caddy（git 忽略，不入库），由 import 原样导入：
+# 不能走环境变量传入——bcrypt 哈希形如 $2a$14$xxx，其中的 $ 会被
+# docker compose 的变量插值静默截断（实测容器只收到 $2a$14），Basic Auth 失效
 :80 {
-	# basic_auth 为 Caddy 2.8+ 指令名（basicauth 是旧别名，仍可用）
-	# 哈希生成：docker run --rm caddy:2-alpine caddy hash-password --plaintext '你的密码'
-	basic_auth {
-		{$BASIC_AUTH_USER} {$BASIC_AUTH_HASH}
-	}
+	# 导入 /etc/caddy/auth.caddy（由 compose 只读挂载 ./auth.caddy），内容形如：
+	#   basic_auth {
+	#       你的用户名 $2a$14$...完整哈希...
+	#   }
+	import /etc/caddy/auth.caddy
 
 	# 静态页面与后端 API 全部转给 frontend 容器（nginx 继续负责静态/API 分流）
 	# 前端请求均为相对路径，API 流量同样经过这里，一并被鉴权覆盖

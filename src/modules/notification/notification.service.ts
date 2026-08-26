@@ -4,7 +4,13 @@
 export interface NotificationPayload {
   userId: string;
   taskId: string;
-  type: 'grab_success' | 'grab_failed' | 'grab_started' | 'seat_taken' | 'session_precheck_failed';
+  type:
+    | 'grab_success'
+    | 'grab_failed'
+    | 'grab_started'
+    | 'seat_taken'
+    | 'session_precheck_failed'
+    | 'preparse_warning';
   data: {
     seatTitle?: string;
     categoryId?: string;

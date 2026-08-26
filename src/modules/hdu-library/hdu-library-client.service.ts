@@ -7,6 +7,7 @@ import {
   SearchSeatsResult,
   SeatInfo,
   RoomInfo,
+  RoomSeats,
 } from './dto/search-seats-result.dto';
 import { BookSeatsParams } from './dto/book-seats-params.dto';
 import { BookSeatsResult } from './dto/book-seats-result.dto';
@@ -250,6 +251,7 @@ export class HduLibraryClientService {
   /**
    * 解析第三方 data.info / data.POIs 结构为内部 DTO
    * 同时提取 content 里内嵌的 userInfo.id（预约人内部 id）
+   * 以及 allContent 里各房间的完整座位表（房间目录）
    */
   private transformSearchResponse(raw: any): SearchSeatsResult {
     const info = raw?.data?.info ?? {};
@@ -265,19 +267,7 @@ export class HduLibraryClientService {
     };
 
     // 座位列表（data.POIs，have_socket → hasSocket，state 转数字）
-    const seats: SeatInfo[] = pois.map((poi: any) => ({
-      id: String(poi.id ?? ''),
-      title: String(poi.title ?? ''),
-      state: Number(poi.state ?? 0),
-      x: Number(poi.x ?? 0),
-      y: Number(poi.y ?? 0),
-      w: Number(poi.w ?? 0),
-      h: Number(poi.h ?? 0),
-      hasSocket:
-        poi.have_socket === '1' ||
-        poi.have_socket === 1 ||
-        poi.have_socket === true,
-    }));
+    const seats: SeatInfo[] = pois.map((poi: any) => this.toSeatInfo(poi));
 
     // 推荐座位：取 data.bestPairSeats.seats 与 POIs 里 recommend=true 的 id
     const recommendedSeats: string[] = [];
@@ -313,9 +303,77 @@ export class HduLibraryClientService {
       seats,
       recommendedSeats,
       bestPairSeats: bestPairSeatsPairs,
+      allRooms: this.extractAllRooms(raw, room, seats),
       userInfoId: this.extractUserInfoId(raw),
       rawUiType: String(raw?.ui_type ?? ''),
     };
+  }
+
+  /** 第三方 POI 节点 → 内部 SeatInfo（data.POIs 与各房间 seatMap.POIs 共用） */
+  private toSeatInfo(poi: any): SeatInfo {
+    return {
+      id: String(poi.id ?? ''),
+      title: String(poi.title ?? ''),
+      state: Number(poi.state ?? 0),
+      x: Number(poi.x ?? 0),
+      y: Number(poi.y ?? 0),
+      w: Number(poi.w ?? 0),
+      h: Number(poi.h ?? 0),
+      hasSocket:
+        poi.have_socket === '1' ||
+        poi.have_socket === 1 ||
+        poi.have_socket === true,
+    };
+  }
+
+  /**
+   * 提取分类下所有房间的完整座位表：
+   * 深搜 allContent（以及兜底整个响应）中形如 { info:{id,title}, POIs:[...] } 的房间块，
+   * 按 roomId 去重，并确保 data 指向的推荐房间也在目录里。
+   * 注意：搜索响应的"推荐房间"在多房间分类下会轮换，只有 allContent 才是稳定全量目录
+   */
+  private extractAllRooms(raw: any, dataRoom: RoomInfo, dataSeats: SeatInfo[]): RoomSeats[] {
+    const roomsById = new Map<string, RoomSeats>();
+
+    const visitRoomBlock = (block: any): void => {
+      const roomId = String(block?.info?.id ?? '');
+      if (!roomId || roomsById.has(roomId)) {
+        return;
+      }
+      if (!Array.isArray(block?.POIs) || block.POIs.length === 0) {
+        return;
+      }
+      roomsById.set(roomId, {
+        id: roomId,
+        name: String(block.info.title ?? ''),
+        seats: block.POIs.map((poi: any) => this.toSeatInfo(poi)),
+      });
+    };
+
+    const walk = (o: any): void => {
+      if (!o || typeof o !== 'object') {
+        return;
+      }
+      if (Array.isArray(o)) {
+        o.forEach(walk);
+        return;
+      }
+      if (o.info?.id !== undefined && Array.isArray(o.POIs)) {
+        visitRoomBlock(o);
+      }
+      Object.values(o).forEach(walk);
+    };
+
+    // data（推荐房间）优先入目录，再深搜 allContent 补齐其余房间
+    if (dataRoom.id && dataSeats.length > 0) {
+      roomsById.set(dataRoom.id, {
+        id: dataRoom.id,
+        name: dataRoom.name,
+        seats: dataSeats,
+      });
+    }
+    walk(raw?.allContent);
+    return [...roomsById.values()];
   }
 
   /**

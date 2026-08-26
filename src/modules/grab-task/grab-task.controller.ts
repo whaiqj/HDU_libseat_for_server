@@ -62,6 +62,8 @@ export class GrabTaskController {
       accountId: task.accountId,
       categoryId: task.categoryId,
       contentId: task.contentId,
+      roomId: task.roomId ?? null,
+      roomName: task.roomName ?? null,
       beginTime: task.beginTime,
       duration: task.duration,
       seatPreference: task.seatPreference ?? [],

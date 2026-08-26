@@ -13,6 +13,16 @@ export class CreateGrabTaskDto {
   @IsString()
   contentId: string;
 
+  /** 指定房间 ID（可选）。多房间分类下锁定房间，座位号才能唯一解析为 seatId */
+  @IsString()
+  @IsOptional()
+  roomId?: string;
+
+  /** 指定房间名称（可选，展示用） */
+  @IsString()
+  @IsOptional()
+  roomName?: string;
+
   @IsNumber()
   beginTime: number;
 

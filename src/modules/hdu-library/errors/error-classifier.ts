@@ -62,7 +62,8 @@ export function classifyError(
 
 /**
  * 可重试的错误分类集合
- * UNKNOWN 也纳入可重试，但应在重试循环中限制更少的重试次数
+ * UNKNOWN 也纳入可重试：由重试循环降级为保守低频节奏（见 RETRY_CONFIG.unknownDegradeThreshold），
+ * 不作为终止条件 —— 未知文案误杀任务的代价高于低频多试
  */
 export const RETRYABLE: Set<ErrorCategory> = new Set([
   ErrorCategory.NETWORK,

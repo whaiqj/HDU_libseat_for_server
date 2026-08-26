@@ -56,6 +56,8 @@ export class GrabTaskService {
       accountId: dto.accountId,
       categoryId: dto.categoryId,
       contentId: dto.contentId,
+      roomId: dto.roomId ?? null,
+      roomName: dto.roomName ?? null,
       beginTime: dto.beginTime,
       duration: dto.duration,
       seatPreference: dto.seatPreference ?? [],

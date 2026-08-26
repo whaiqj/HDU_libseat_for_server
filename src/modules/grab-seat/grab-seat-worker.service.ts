@@ -1,6 +1,7 @@
 import { Injectable, Inject, Logger } from '@nestjs/common';
 import { HduLibraryClientService } from '../hdu-library/hdu-library-client.service';
 import { SeatSelectionStrategy } from './strategies/seat-selection.strategy';
+import { SeatPreparseService, PreparseEntry, PreparsedSeat } from './seat-preparse.service';
 import { GrabTaskService } from '../grab-task/grab-task.service';
 import {
   GrabAttemptLogService,
@@ -41,8 +42,36 @@ export const RETRY_CONFIG = {
   rateLimitBackoffMs: 3_000, // 限流错误短退避：3秒
   windowNotOpenIntervalMs: 300, // WINDOW_NOT_OPEN 快速重试：300ms（窗口随时可能开放）
   windowNotOpenDegradeThreshold: 10, // 连续命中 10 次后降级到常规间隔（保险丝：防止误分类导致失控空转）
-  unknownMaxAttempts: 2, // UNKNOWN 未知错误独立重试上限（问题7 设计原则 #1）
+  /**
+   * UNKNOWN 未知错误降级阈值：累计达 2 次后降级为保守低频重试（lowFreqIntervalMs），
+   * 不再终止任务 —— 由 3 分钟窗口时间兜底。
+   * 8/23 教训：限流文案被误判为 UNKNOWN 后 2 次即终止，三任务全灭；
+   * 未知文案误杀任务的代价远大于多打几发低频请求
+   */
+  unknownDegradeThreshold: 2,
   windowMs: 3 * 60 * 1000, // 3分钟总时间窗口硬上限
+
+  // ---- 盲抢（book-first）节奏：受服务端 book 频控约束（实测约 1 次/秒/账号）----
+  /** WINDOW_NOT_OPEN 盲发间隔：略高于 1s 频控线，避免无效请求被拒 */
+  blindWindowNotOpenIntervalMs: 1_150,
+  /** 限流后退避：计数大概率刚清零，等满频控窗口再发 */
+  blindRateLimitBackoffMs: 1_400,
+  /** book 网络超时后的确认搜索退避 */
+  blindNetworkBackoffMs: 800,
+  /** 连续网络错误上限：超过后任务失败（避免盲打无响应的服务端） */
+  blindMaxConsecutiveNetworkErrors: 5,
+  /**
+   * 盲抢起始偏移：两晚实测（8/22、8/23）放号窗口在 triggerAt 后约 5s 才真正开放，
+   * 之前的请求只会白烧限流配额（8/23 三账号 T=0 齐发，第二轮起全部被限流），
+   * 首击直接对齐 anchor + 5s，不做无效尝试
+   */
+  blindStartOffsetMs: 5_000,
+  /**
+   * 盲抢间隔随机上浮幅度（0 ~ 2×spread）：多账号并发时打破齐步节奏，
+   * 避免同退避后同瞬间重发、互相触发 IP 级限流（8/23 三任务齐步走全灭）。
+   * 只上浮不缩短——任何间隔都不低于配置值，守住单账号频控下限
+   */
+  blindJitterSpreadMs: 200,
 };
 
 /** 单次抢座尝试结果 */
@@ -79,6 +108,7 @@ export class GrabSeatWorker {
   constructor(
     private readonly hduLibraryClient: HduLibraryClientService,
     private readonly seatSelection: SeatSelectionStrategy,
+    private readonly seatPreparse: SeatPreparseService,
     private readonly grabTaskService: GrabTaskService,
     private readonly attemptLogService: GrabAttemptLogService,
     @Inject('IAuthKeeperService')
@@ -129,6 +159,21 @@ export class GrabSeatWorker {
     }
     const highFreqEnd = anchor + RETRY_CONFIG.highFreqDurationMs;
     const deadline = anchor + RETRY_CONFIG.windowMs;
+
+    // 盲抢分流（book-first）：严格模式 + 指定偏好座位 + 预解析成功时，
+    // bookSeats 直发不再经过 searchSeats —— search 快照在开闸瞬间不可信（实测会闪断/轮换房间），
+    // 且拥塞时 8s 超时会把整条抢座链路卡死；bookSeats 才是唯一裁判
+    const preparsed = await this.resolvePreparse(task);
+    if (preparsed) {
+      await this.executeBlindGrab(
+        task,
+        preparsed,
+        deadline,
+        startMs,
+        anchor + RETRY_CONFIG.blindStartOffsetMs,
+      );
+      return;
+    }
 
     let attempt = 0;
     let unknownAttempts = 0;
@@ -229,18 +274,10 @@ export class GrabSeatWorker {
         return;
       }
 
-      // UNKNOWN 未知错误单独限制重试上限，避免对不明错误无限重试
+      // UNKNOWN 未知错误：累计计数，达到阈值后降级为保守低频（见下方间隔决策），
+      // 不再终止任务 —— 8/23 教训：未知文案误杀任务代价过高，由窗口时间兜底
       if (result.errorCategory === ErrorCategory.UNKNOWN) {
         unknownAttempts++;
-        if (unknownAttempts >= RETRY_CONFIG.unknownMaxAttempts) {
-          await this.markFailed(
-            task,
-            `未知错误重试达 ${RETRY_CONFIG.unknownMaxAttempts} 次上限，终止`,
-            attempt,
-            startMs,
-          );
-          return;
-        }
       }
 
       // 决定下一轮前的等待间隔（优先级见 RETRY_CONFIG 注释）：
@@ -261,10 +298,12 @@ export class GrabSeatWorker {
         // 命中其他错误类型时清零 WINDOW_NOT_OPEN 连续计数
         consecutiveWindowNotOpen = 0;
 
+        // UNKNOWN 降级保险丝：未知错误累计达阈值后强制低频，避免对不明错误高频空转
+        const degraded = unknownAttempts >= RETRY_CONFIG.unknownDegradeThreshold;
         nextInterval =
           result.errorCategory === ErrorCategory.RATE_LIMIT
             ? RETRY_CONFIG.rateLimitBackoffMs
-            : Date.now() < highFreqEnd
+            : !degraded && Date.now() < highFreqEnd
               ? RETRY_CONFIG.highFreqIntervalMs
               : RETRY_CONFIG.lowFreqIntervalMs;
       }
@@ -298,6 +337,343 @@ export class GrabSeatWorker {
       ? `${lastSeatError}（已尝试 ${attempt} 次后放弃）`
       : '超出时间窗口';
     await this.markFailed(task, reason, attempt, startMs);
+  }
+
+  /**
+   * 获取盲抢预解析结果：优先读预检（T-5min）缓存；
+   * 缓存缺失（后端重启/预检失败）时惰性补一次 —— 成本与 search-first 首轮相同（一次 search），
+   * 却能换来整个窗口的 book-first 节奏
+   */
+  private async resolvePreparse(task: GrabTask): Promise<PreparseEntry | null> {
+    if (!task.strictMode || !task.seatPreference?.length) {
+      return null;
+    }
+    let entry = this.seatPreparse.get(task.id);
+    if (!entry) {
+      entry = await this.seatPreparse.preparse(task);
+    }
+    return entry && entry.seats.length > 0 ? entry : null;
+  }
+
+  /**
+   * 盲抢主循环（book-first）：跳过 searchSeats，直接以预解析的 seatId 循环 bookSeats。
+   * 状态机出口：
+   * - WINDOW_NOT_OPEN → 1.15s 重试同座位（受 1s/账号 book 频控约束）
+   * - RATE_LIMIT      → 1.4s 退避后重试（被限流的请求不算有效尝试）
+   * - SEAT_TAKEN      → 不弃座不终止：轮转候选（单座位即重试本座），常规频率打到窗口结束
+   *                     （被占可能是瞬态假象，且他人取消会释放座位）
+   * - SESSION_EXPIRED → 刷新会话后重试
+   * - NETWORK/超时     → 先 search 确认座位真实状态（book 可能已被受理）再决定重试或换座
+   * - 未知错误        → 不终止：累计 2 次后降级低频（3s），由 3 分钟窗口兜底
+   * @param firstFireMs 首击时刻（anchor + blindStartOffsetMs）：真实放号在 triggerAt 后约 5s，
+   *                    之前的尝试只会白烧限流配额，循环开始前先等到该时刻
+   */
+  private async executeBlindGrab(
+    task: GrabTask,
+    preparsed: PreparseEntry,
+    deadline: number,
+    startMs: number,
+    firstFireMs: number,
+  ): Promise<void> {
+    this.logger.log(
+      `[盲抢模式] taskId=${task.id} 房间=${preparsed.roomName}(${preparsed.roomId}) ` +
+        `候选=${preparsed.seats.map((s) => `${s.title}(${s.seatId})`).join(' → ')} ` +
+        `userInfoId=${preparsed.userInfoId}`,
+    );
+
+    // 起始偏移：唤醒早于首击时刻（正常：T-0 唤醒，等 5s）则等待；
+    // 唤醒已晚于首击时刻（队列延迟）则立即开打。
+    // 等待时长钳制到偏移量本身，防御锚点异常（时钟回拨/测试 fake timers）导致超长等待。
+    // 首击也带随机上浮：多账号并发时首击不再是同一瞬间的齐射，
+    // 各任务错开落在 T+5s ~ T+5.4s 区间，避免互相触发 IP 级限流
+    const baseWaitMs = Math.min(
+      Math.max(0, firstFireMs - Date.now()),
+      RETRY_CONFIG.blindStartOffsetMs,
+    );
+    const initialWaitMs = baseWaitMs > 0 ? this.jitterMs(baseWaitMs) : 0;
+    if (initialWaitMs > 0) {
+      this.logger.log(
+        `[盲抢起始偏移] taskId=${task.id} ${Math.round(initialWaitMs)}ms 后首击` +
+          `（真实放号约在 triggerAt+${RETRY_CONFIG.blindStartOffsetMs / 1000}s）`,
+      );
+      if (await this.sleepInterruptible(initialWaitMs, task.id)) {
+        this.logTaskFinished(task.id, 'cancelled', null, 0, startMs);
+        return;
+      }
+    }
+
+    // 候选队列：偏好顺序，被占用后逐个出队
+    const queue: PreparsedSeat[] = [...preparsed.seats];
+    // 已提醒过被占的座位（与 search-first 的 notifiedTakenSeats 语义一致）
+    const notifiedTakenSeats = new Set<string>();
+
+    let attempt = 0;
+    let unknownAttempts = 0;
+    let consecutiveWindowNotOpen = 0;
+    let consecutiveNetworkErrors = 0;
+
+    while (Date.now() < deadline && queue.length > 0) {
+      if (this.grabTaskService.isCancellationRequested(task.id)) {
+        this.logger.log(`[任务已被用户取消] taskId=${task.id}`);
+        this.logTaskFinished(task.id, 'cancelled', null, attempt, startMs);
+        return;
+      }
+
+      const seat = queue[0];
+      attempt++;
+      this.fireAndForget(
+        this.grabTaskService.incrementAttempts(task.id),
+        `incrementAttempts taskId=${task.id}`,
+      );
+
+      const bookStartMs = Date.now();
+      const bookResult = await this.hduLibraryClient.bookSeats(
+        {
+          beginTime: Number(task.beginTime),
+          duration: task.duration,
+          seats: [seat.seatId],
+          is_recommend: 0,
+          api_time: Math.floor(Date.now() / 1000),
+          seatBookers: [preparsed.userInfoId],
+        },
+        task.accountId,
+        task.id,
+      );
+      const bookEndMs = Date.now();
+
+      // 盲抢轮次结构化日志（与 grab_round 对齐，phase=blind 便于区分）
+      this.logger.debug(
+        JSON.stringify({
+          event: 'grab_round',
+          taskId: task.id,
+          attempt,
+          phase: 'blind',
+          wakeupMs: null,
+          roundStartMs: bookStartMs,
+          roundEndMs: bookEndMs,
+          success: bookResult.success,
+          errorCategory: bookResult.success
+            ? null
+            : this.mapBookErrorToCategory(bookResult.errorCode),
+          errorMessage: bookResult.errorMessage ?? null,
+          searchDurationMs: null,
+          bookCount: 1,
+          bookDurationMs: bookEndMs - bookStartMs,
+        }),
+      );
+
+      if (bookResult.success) {
+        await this.writeAttemptLog(
+          {
+            taskId: task.id,
+            accountId: task.accountId,
+            seatId: seat.seatId,
+            result: AttemptResult.SUCCESS,
+            searchStartMs: null,
+            searchEndMs: null,
+            bookStartMs,
+            bookEndMs,
+          },
+          true,
+        );
+        await this.markSuccess(
+          task,
+          {
+            success: true,
+            bookedSeatId: seat.seatId,
+            seatTitle: seat.title,
+          },
+          attempt,
+          startMs,
+        );
+        return;
+      }
+
+      // 失败日志（此后大概率还有请求 → fire-and-forget）
+      this.writeAttemptLog(
+        {
+          taskId: task.id,
+          accountId: task.accountId,
+          seatId: seat.seatId,
+          result: AttemptResult.FAILED,
+          errorMsg: bookResult.errorMessage,
+          searchStartMs: null,
+          searchEndMs: null,
+          bookStartMs,
+          bookEndMs,
+        },
+        false,
+      );
+
+      const errorCategory = this.mapBookErrorToCategory(bookResult.errorCode);
+      this.logger.log(
+        `[盲抢第 ${attempt} 次尝试结果] taskId=${task.id} seat=${seat.title}(${seat.seatId}) ` +
+          `errorCategory=${errorCategory} errorMessage=${bookResult.errorMessage ?? '-'}`,
+      );
+
+      // ---- 状态机出口 ----
+      if (errorCategory === ErrorCategory.WINDOW_NOT_OPEN) {
+        consecutiveWindowNotOpen++;
+        consecutiveNetworkErrors = 0;
+        const interval =
+          consecutiveWindowNotOpen < RETRY_CONFIG.windowNotOpenDegradeThreshold
+            ? this.jitterMs(RETRY_CONFIG.blindWindowNotOpenIntervalMs)
+            : RETRY_CONFIG.lowFreqIntervalMs; // 保险丝：连续未开窗太久则降频
+        if (await this.sleepInterruptible(Math.min(interval, deadline - Date.now()), task.id)) {
+          this.logTaskFinished(task.id, 'cancelled', null, attempt, startMs);
+          return;
+        }
+        continue;
+      }
+
+      consecutiveWindowNotOpen = 0;
+
+      if (errorCategory === ErrorCategory.RATE_LIMIT) {
+        consecutiveNetworkErrors = 0;
+        if (
+          await this.sleepInterruptible(
+            Math.min(this.jitterMs(RETRY_CONFIG.blindRateLimitBackoffMs), deadline - Date.now()),
+            task.id,
+          )
+        ) {
+          this.logTaskFinished(task.id, 'cancelled', null, attempt, startMs);
+          return;
+        }
+        continue;
+      }
+
+      if (errorCategory === ErrorCategory.SEAT_UNAVAILABLE) {
+        consecutiveNetworkErrors = 0;
+        // 座位被占：不弃座、不终止、不降频（8/24 用户裁决：被占可能是瞬态假象——
+        // 网页端"看着被占、多试几次又能选"是常态；且他人取消会释放座位）。
+        // 轮转到下一个候选（单座位即重试本座），以常规重试频率持续打到窗口结束
+        queue.push(queue.shift()!);
+        if (!notifiedTakenSeats.has(seat.seatId)) {
+          notifiedTakenSeats.add(seat.seatId);
+          void this.notifySeatTaken(task, seat.title);
+        }
+        if (
+          await this.sleepInterruptible(
+            Math.min(this.jitterMs(RETRY_CONFIG.blindWindowNotOpenIntervalMs), deadline - Date.now()),
+            task.id,
+          )
+        ) {
+          this.logTaskFinished(task.id, 'cancelled', null, attempt, startMs);
+          return;
+        }
+        continue;
+      }
+
+      if (errorCategory === ErrorCategory.SESSION_EXPIRED) {
+        try {
+          await this.authKeeper.refreshSession(task.accountId);
+        } catch (e) {
+          await this.markFailed(
+            task,
+            `登录态刷新失败: ${(e as Error).message}`,
+            attempt,
+            startMs,
+          );
+          return;
+        }
+        continue; // 会话已刷新，立即重试同座位
+      }
+
+      if (errorCategory === ErrorCategory.NETWORK) {
+        consecutiveNetworkErrors++;
+        // book 超时 ≠ 失败：服务端可能已受理。先 search 确认座位真实状态，
+        // 仍空闲(state=0) → 肯定没约上，重试；非空闲 → 可能是自己的预约生效，也可能是被抢 → 换座
+        const confirmed = await this.confirmSeatState(
+          task,
+          preparsed.roomId,
+          seat,
+        );
+        if (confirmed === 'available') {
+          if (consecutiveNetworkErrors >= RETRY_CONFIG.blindMaxConsecutiveNetworkErrors) {
+            await this.markFailed(task, '连续网络异常，盲抢终止', attempt, startMs);
+            return;
+          }
+          await this.sleepInterruptible(
+            Math.min(this.jitterMs(RETRY_CONFIG.blindNetworkBackoffMs), deadline - Date.now()),
+            task.id,
+          );
+          continue; // 重试同座位
+        }
+        // 状态未知或非空闲：按被占处理 —— 同样不弃座不终止，轮转继续打到窗口结束
+        queue.push(queue.shift()!);
+        await this.sleepInterruptible(
+          Math.min(this.jitterMs(RETRY_CONFIG.blindWindowNotOpenIntervalMs), deadline - Date.now()),
+          task.id,
+        );
+        continue;
+      }
+
+      // 不可重试错误（黑名单/参数错误等）
+      if (!isRetryable(errorCategory)) {
+        await this.markFailed(task, bookResult.errorMessage ?? '不可重试错误', attempt, startMs);
+        return;
+      }
+
+      // UNKNOWN：不终止。累计达阈值后降级为保守低频重试（3s），
+      // 由 3 分钟窗口兜底 —— 8/23 教训：未知文案误杀任务（2 次即死）的
+      // 代价远高于低频多打几发（窗口内可达 ~55 次，远超 8 次底线）
+      unknownAttempts++;
+      const unknownInterval =
+        unknownAttempts >= RETRY_CONFIG.unknownDegradeThreshold
+          ? RETRY_CONFIG.lowFreqIntervalMs
+          : RETRY_CONFIG.blindWindowNotOpenIntervalMs;
+      await this.sleepInterruptible(
+        Math.min(this.jitterMs(unknownInterval), deadline - Date.now()),
+        task.id,
+      );
+    }
+
+    // 窗口结束（queue 为空的情况已在循环内处理）
+    if (queue.length > 0) {
+      await this.markFailed(task, '超出时间窗口（盲抢）', attempt, startMs);
+    }
+  }
+
+  /**
+   * book 网络超时后的座位状态确认：search 该房间一次，返回目标座位当前状态
+   * @returns 'available' 空闲可约 / 'taken' 非空闲 / 'unknown' 查询失败
+   */
+  private async confirmSeatState(
+    task: GrabTask,
+    roomId: string,
+    seat: PreparsedSeat,
+  ): Promise<'available' | 'taken' | 'unknown'> {
+    try {
+      const searchResult = await this.hduLibraryClient.searchSeats(
+        {
+          beginTime: Number(task.beginTime),
+          duration: task.duration,
+          num: 1,
+          space_category: {
+            category_id: task.categoryId,
+            content_id: task.contentId,
+          },
+        },
+        task.accountId,
+        task.id,
+      );
+      // 优先在房间目录里找目标房间（search 推荐房间会轮换），退化为 seats 主列表
+      const room =
+        searchResult.allRooms?.find((r) => r.id === roomId) ??
+        (searchResult.room.id === roomId
+          ? { id: searchResult.room.id, name: searchResult.room.name, seats: searchResult.seats }
+          : null);
+      if (!room) {
+        return 'unknown';
+      }
+      const found = room.seats.find((s) => s.id === seat.seatId);
+      return found && found.state === 0 ? 'available' : 'taken';
+    } catch (e) {
+      this.logger.warn(
+        `[确认座位状态失败] taskId=${task.id} seat=${seat.seatId} message=${(e as Error).message}`,
+      );
+      return 'unknown';
+    }
   }
 
   /**
@@ -562,6 +938,27 @@ export class GrabSeatWorker {
     }
   }
 
+  /** 任务终态收尾日志（盲抢与 search-first 共用的结构化事件） */
+  private logTaskFinished(
+    taskId: string,
+    result: 'success' | 'failed' | 'cancelled',
+    seatId: string | null,
+    totalRounds: number,
+    startMs: number,
+  ): void {
+    this.logger.log(
+      JSON.stringify({
+        event: 'task_finished',
+        taskId,
+        result,
+        seatId,
+        totalDurationMs: Date.now() - startMs,
+        totalRounds,
+        ts: Date.now(),
+      }),
+    );
+  }
+
   /**
    * 标记任务成功并通知
    */
@@ -638,9 +1035,6 @@ export class GrabSeatWorker {
     }
     if (reason.includes('已尝试') && reason.includes('次后放弃')) {
       return 'retry_exhausted';
-    }
-    if (reason.includes('未知错误重试达')) {
-      return 'unknown_retry_limit';
     }
     if (reason.includes('登录态刷新失败')) {
       return 'login_failed';
@@ -719,6 +1113,15 @@ export class GrabSeatWorker {
 
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * 盲抢间隔随机上浮（0 ~ 2×spread）：多账号并发时打破齐步节奏，
+   * 避免同退避后同瞬间重发、互相触发 IP 级限流。
+   * 只上浮不缩短——任何间隔都不低于配置值，守住单账号频控下限
+   */
+  private jitterMs(ms: number): number {
+    return ms + Math.random() * 2 * RETRY_CONFIG.blindJitterSpreadMs;
   }
 
   /**

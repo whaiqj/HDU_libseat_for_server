@@ -37,6 +37,17 @@ export class GrabTask {
   @Column({ type: 'varchar', length: 64 })
   contentId: string;
 
+  /**
+   * 指定房间 ID（可选）。多房间分类下同一座位号在不同房间是不同 seatId，
+   * 锁定房间后偏好座位号才能唯一解析；为空时由预解析自动挑选
+   */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  roomId: string | null;
+
+  /** 指定房间名称（可选，冗余存储便于前端展示与日志可读） */
+  @Column({ type: 'varchar', length: 128, nullable: true })
+  roomName: string | null;
+
   /** 预约使用的开始时间（Unix 时间戳，传给 searchSeats/bookSeats） */
   @Column({ type: 'bigint' })
   beginTime: number;

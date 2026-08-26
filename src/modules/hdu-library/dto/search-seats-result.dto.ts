@@ -25,6 +25,13 @@ export interface RoomInfo {
   height: number;
 }
 
+/** 房间目录条目：来自响应 allContent 的各房间完整座位表（含 data 指向的推荐房间） */
+export interface RoomSeats {
+  id: string;
+  name: string;
+  seats: SeatInfo[];
+}
+
 /**
  * searchSeats 接口返回结果（内部 DTO）
  * 由第三方 data.info / data.POIs 结构拍平转换而来
@@ -36,6 +43,11 @@ export class SearchSeatsResult {
   recommendedSeats: string[];
   /** 双人推荐组合 */
   bestPairSeats?: string[][];
+  /**
+   * 分类下所有房间的完整座位表（来自 allContent，含 data 指向的推荐房间）。
+   * 同一座位号在不同房间是不同 seatId，偏好座位号必须先锁定房间才能解析成 seatId
+   */
+  allRooms?: RoomSeats[];
   /**
    * 当前登录用户的图书馆内部 id（来自 content 里 userInfo.id）
    * 用于 bookSeats 的 seatBookers[0]，不能与 cookie 里的 uid 混用

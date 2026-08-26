@@ -8,6 +8,8 @@ export class GrabTaskResponseDto {
   accountId: string;
   categoryId: string;
   contentId: string;
+  roomId: string | null;
+  roomName: string | null;
   beginTime: number;
   duration: number;
   seatPreference: string[];

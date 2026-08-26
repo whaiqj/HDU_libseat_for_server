@@ -16,7 +16,10 @@ export const ERROR_PATTERNS: Record<ErrorCategory, RegExp[]> = {
   // 网络层/参数错误不靠文本匹配，靠 HTTP 状态码或异常类型判断
   [ErrorCategory.NETWORK]: [],
   // 请求过快被限流：单独分流，与 UNKNOWN 区分开，避免占用 UNKNOWN 的保守重试上限
-  [ErrorCategory.RATE_LIMIT]: [/操作过于频繁/, /请求过于频繁/, /操作太频繁/],
+  // 注意："请求太频繁了，请稍后再试" 是 8/22、8/23 放号实测文案，此前漏配导致
+  // 限流被误判为 UNKNOWN、2 次就终止任务（8/23 三任务 3 发全灭的根因）。
+  // 只匹配具体的"频繁"文案，不能只匹配"请稍后再试"——"系统繁忙，请稍后再试"是 UNKNOWN
+  [ErrorCategory.RATE_LIMIT]: [/操作过于频繁/, /请求过于频繁/, /操作太频繁/, /请求太频繁/],
   [ErrorCategory.PARAM_INVALID]: [/您必须在预约人列表中/],
   [ErrorCategory.UNKNOWN]: [],
 };
