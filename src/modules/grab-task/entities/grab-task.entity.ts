@@ -29,11 +29,11 @@ export class GrabTask {
   @Column({ type: 'varchar', length: 64 })
   accountId: string;
 
-  /** 空间分类 ID（对应第三方 space_category.category_id，如二楼东=591） */
+  /** 空间分类 ID（审计字段：自习室业务固定 591，由后端从全局常量自动填充） */
   @Column({ type: 'varchar', length: 64 })
   categoryId: string;
 
-  /** 空间内容 ID（对应第三方 space_category.content_id，如二楼东=3） */
+  /** 空间内容 ID（审计字段：自习室业务固定 3，由后端从全局常量自动填充） */
   @Column({ type: 'varchar', length: 64 })
   contentId: string;
 

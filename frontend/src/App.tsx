@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { ROOMS } from "./config/rooms";
 import { toBeijingTimestamp } from "./utils/time";
-import { createGrabTask, cancelGrabTask, getGrabTask } from "./api/grabTasks";
+import { createGrabTask, cancelGrabTask, getGrabTask, listGrabTasks } from "./api/grabTasks";
 import {
   listAccounts,
   addAccount,
@@ -215,6 +215,50 @@ export default function App() {
     return () => clearInterval(timer);
   }, [loadAccounts]);
 
+  // 页面加载时拉取所有账号的活跃任务（pending / running），
+  // 让刷新或重新打开页面后仍能看到之前提交的抢座任务。
+  // 依赖项用账号 id 拼接字符串，避免 accounts 引用变化（30s 轮询）导致重复拉取。
+  const accountIdsKey = accounts.map((a) => a.id).join(",");
+  useEffect(() => {
+    if (accounts.length === 0) return;
+    // 只在页面首次加载 / 账号集合真正变化时拉一次，
+    // 已存在的任务状态由各自的 TaskStatusDisplay 内部轮询维护。
+    let cancelled = false;
+
+    (async () => {
+      const results = await Promise.allSettled(
+        accounts.map((a) => listGrabTasks(a.id))
+      );
+      if (cancelled) return;
+
+      const activeTasks: TaskStatus[] = [];
+      results.forEach((result, index) => {
+        if (result.status !== "fulfilled") return;
+        const account = accounts[index];
+        result.value
+          .filter(
+            (t) => t.status === "pending" || t.status === "running"
+          )
+          .forEach((t) => {
+            activeTasks.push({
+              accountId: account.id,
+              taskId: t.id,
+              username: account.username,
+            });
+          });
+      });
+
+      if (activeTasks.length > 0) {
+        setTaskStatuses(activeTasks);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountIdsKey]);
+
   const toggleAccountSelection = (accountId: string) => {
     setSelectedAccountIds((prev) => {
       const newSet = new Set(prev);
@@ -351,8 +395,8 @@ export default function App() {
 
           const res = await createGrabTask({
             accountId,
-            categoryId: room.categoryId,
-            contentId: room.contentId,
+            roomId: room.roomId,
+            roomName: room.name,
             beginTime,
             duration,
             seatPreference,

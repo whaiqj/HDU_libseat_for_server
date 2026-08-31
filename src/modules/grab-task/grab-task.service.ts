@@ -8,6 +8,7 @@ import { Not, Repository } from 'typeorm';
 import { GrabTask, TaskStatus } from './entities/grab-task.entity';
 import { CreateGrabTaskDto } from './dto/create-grab-task.dto';
 import { TaskSchedulerService } from '../scheduler/task-scheduler.service';
+import { STUDY_ROOM_SPACE_CATEGORY } from '../../common/constants/study-room';
 
 @Injectable()
 export class GrabTaskService {
@@ -52,10 +53,15 @@ export class GrabTaskService {
     // 跨账号偏好重合软校验（不阻断，仅返回 warnings）
     const warnings = await this.computeCrossAccountWarnings(dto);
 
+    // 自动填充全局 space_category（自习室固定 591/3，所有自习室共用）
+    // 若调用方显式传入则使用传入值（兼容旧客户端 / 未来扩展其他业务类型）
+    const categoryId = dto.categoryId ?? STUDY_ROOM_SPACE_CATEGORY.category_id;
+    const contentId = dto.contentId ?? STUDY_ROOM_SPACE_CATEGORY.content_id;
+
     const task = this.grabTaskRepository.create({
       accountId: dto.accountId,
-      categoryId: dto.categoryId,
-      contentId: dto.contentId,
+      categoryId,
+      contentId,
       roomId: dto.roomId ?? null,
       roomName: dto.roomName ?? null,
       beginTime: dto.beginTime,

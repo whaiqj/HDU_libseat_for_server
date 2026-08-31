@@ -11,6 +11,7 @@ import { GrabTask, TaskStatus } from '../grab-task/entities/grab-task.entity';
 import { encryptSecret, decryptSecret } from '../../common/utils/crypto.util';
 import { casLogin } from '../../cas/cas-login';
 import type { CasLoginResult } from '../../cas/cas-login';
+import { CAS_SERVICE_URL } from '../../common/constants/study-room';
 import type { IAuthKeeperService, SessionCredential } from '../session/auth-keeper.service';
 
 /** 创建账号 DTO */
@@ -44,9 +45,7 @@ export class AccountService {
     @Inject('IAuthKeeperService')
     private readonly authKeeper: IAuthKeeperService,
   ) {
-    this.serviceUrl =
-      process.env.CAS_SERVICE ??
-      'https://hdu.huitu.zhishulib.com/User/Index/hduCASLogin?forward=%2FSpace%2FCategory%2Flist%3Fcategory_id%3D591';
+    this.serviceUrl = process.env.CAS_SERVICE ?? CAS_SERVICE_URL;
   }
 
   /**

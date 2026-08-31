@@ -8,6 +8,7 @@ import { IAuthKeeperService, SessionCredential } from './auth-keeper.service';
 import { Account, AccountStatus } from '../account/entities/account.entity';
 import { casLogin } from '../../cas/cas-login';
 import { LIBRARY_API } from '../../common/constants/api-endpoints';
+import { STUDY_ROOM_SPACE_CATEGORY, CAS_SERVICE_URL } from '../../common/constants/study-room';
 import { buildFormBody, FORM_CONTENT_TYPE } from '../../common/utils/form-urlencoded.util';
 import { encryptSecret, decryptSecret } from '../../common/utils/crypto.util';
 
@@ -51,7 +52,10 @@ export class RealAuthKeeperService implements IAuthKeeperService, OnModuleInit {
       beginTime: Math.floor(Date.now() / 1000),
       duration: 3600,
       num: 1,
-      space_category: { category_id: '591', content_id: '3' },
+      space_category: {
+        category_id: STUDY_ROOM_SPACE_CATEGORY.category_id,
+        content_id: STUDY_ROOM_SPACE_CATEGORY.content_id,
+      },
     };
   }
 
@@ -60,9 +64,7 @@ export class RealAuthKeeperService implements IAuthKeeperService, OnModuleInit {
     @InjectRepository(Account)
     private readonly accountRepo: Repository<Account>,
   ) {
-    this.serviceUrl =
-      process.env.CAS_SERVICE ??
-      'https://hdu.huitu.zhishulib.com/User/Index/hduCASLogin?forward=%2FSpace%2FCategory%2Flist%3Fcategory_id%3D591';
+    this.serviceUrl = process.env.CAS_SERVICE ?? CAS_SERVICE_URL;
     this.libraryBaseUrl =
       process.env.LIBRARY_API_BASE_URL ?? 'https://hdu.huitu.zhishulib.com';
   }

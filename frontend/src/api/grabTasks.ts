@@ -4,8 +4,9 @@ const BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 
 export interface CreateGrabTaskPayload {
   accountId: string;
-  categoryId: string;
-  contentId: string;
+  roomId: string;
+  /** 自习室名称（展示用，通知推送中使用） */
+  roomName: string;
   beginTime: number;
   duration: number;
   seatPreference: string[];
@@ -39,6 +40,15 @@ export interface GrabTaskStatus {
 export async function getGrabTask(id: string): Promise<GrabTaskStatus> {
   const res = await fetch(`${BASE_URL}/grab-tasks/${id}`);
   if (!res.ok) throw new Error(`查询任务失败: ${res.status}`);
+  return res.json();
+}
+
+/**
+ * 查询指定账号下的所有抢座任务
+ */
+export async function listGrabTasks(accountId: string): Promise<GrabTaskStatus[]> {
+  const res = await fetch(`${BASE_URL}/grab-tasks?accountId=${encodeURIComponent(accountId)}`);
+  if (!res.ok) throw new Error(`查询任务列表失败: ${res.status}`);
   return res.json();
 }
 
