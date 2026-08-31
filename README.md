@@ -1,15 +1,15 @@
 # HDU 图书馆座位自动抢座
 
-基于 NestJS 的杭电图书馆座位自动预约系统，通过 CAS 统一认证登录，支持多账号管理，在放号时间点自动抢座。
+基于 NestJS 的杭电图书馆座位自动预约系统，通过 CAS 统一认证登录，支持多账号管理，在放号时间点自动抢座。前端经 **Caddy 反向代理** 对外提供服务，自带 Basic Auth 鉴权，避免 HTTP 明文暴露。
 
 ## 已实现功能
 
 - **多账号管理**：前端添加/删除/强制重登账号，添加时即时 CAS 验证（密码错误不入库）；密码 AES-256-GCM 加密入库，密钥来自环境变量；按 4 账号并发抢座设计（`concurrency=8`，未做账号数硬上限校验）
 - **CAS 统一认证登录**：通过学校 SSO 自动登录（AES-128-ECB 加密密码），每个账号各自维持独立登录态（会话注册表 + 每账号独立登录锁），心跳每账号 5 分钟错峰检测保活
 - **抢座任务管理**：REST API 创建、查询、终止抢座任务；同账号新任务覆盖旧 pending 任务；同账号已有 running 任务时拒绝创建；跨账号座位偏好重合给出软警告
-- **定时抢座调度**：BullMQ 延迟队列，在指定时间点精准触发；**放号前 5 分钟自动执行 session-precheck，无条件刷新该账号登录态**（失败推送 `session_precheck_failed` 通知，不取消主任务）
-- **自动抢座执行**：searchSeats 获取座位 → 按优先级选座（偏好 > 推荐 > 任意）→ bookSeats 提交预约；支持 **strictMode 严格模式**（只抢偏好座位，不降级）
-- **两段式重试**：时间窗口驱动（3 分钟窗口，以 triggerAt 为绝对锚点）——唤醒后前 15 秒高频探测（1 秒/轮），之后低频（3 秒/轮）；座位被占自动换座重试并实时提醒；限流错误单独退避 3 秒；未知错误限 2 次；黑名单/参数错误等不可恢复错误立即终止
+- **定时抢座调度**：BullMQ 延迟队列，在指定时间点精准触发；**放号前 5 分钟自动执行 session-precheck，无条件刷新该账号登录态**（失败推送 `session_precheck_failed` 通知，不取消主任务）；严格模式下同时预解析座位号为 seatId（供盲抢使用）
+- **自动抢座执行**：searchSeats 获取座位 → 按优先级选座（偏好 > 推荐 > 任意）→ bookSeats 提交预约；支持 **strictMode 严格模式**（只抢偏好座位，不降级）；严格模式下启用 **盲抢（book-first）** —— 跳过 searchSeats 直接用预解析的 seatId 提交预约，放号窗口未打开时以 300ms 间隔快速探测（10 次连续命中后退避），并加入随机抖动避免多账号同步触限流
+- **两段式重试**：时间窗口驱动（3 分钟窗口，以 triggerAt 为绝对锚点）——唤醒后前 15 秒高频探测（1 秒/轮），之后低频（3 秒/轮）；座位被占自动换座重试并实时提醒；限流错误单独退避 3 秒；未知错误累计 2 次后退化为低频继续重试（直到窗口耗尽）；黑名单/参数错误等不可恢复错误立即终止
 - **实时提醒**：偏好座位被占时发 `seat_taken` 通知并写入任务结果（`result.takenSeats`），前端轮询实时可见
 - **任务终止**：pending 阶段从队列移除、running 阶段协作式退出，均标记 `cancelled`
 - **模拟通知**：抢座结果写数据库 + 控制台日志（前端轮询查询）
@@ -18,14 +18,15 @@
 ## 未实现 / 待完成
 
 - **微信小程序订阅消息推送**：接口已预留（`INotificationService`），`NotificationModule` 当前仅注入 `MockNotificationService`，WeChat 实现待后续接入
-- **鉴权系统**：账号与任务通过前端统一管理，无用户注册/登录/权限控制
+- **应用内鉴权系统**：账号与任务通过前端统一管理，无多用户注册/登录/细粒度权限控制；入口级鉴权由 Caddy Basic Auth 提供（单用户名 + 密码）
 - **账号数硬上限**：计划目标为最多 4 个账号，代码未实现数量校验（并发余量已按 4 账号设计）
 
 ## 技术栈
 
 - **后端**：NestJS + TypeORM + MySQL + Redis (BullMQ)
 - **前端**：React + Vite + TypeScript
-- **基础设施**：全部容器化（Docker Compose：MySQL + Redis + 后端 + 前端 nginx）
+- **网关 / 安全层**：Caddy（HTTPS + Basic Auth + 反代到前端 nginx）
+- **基础设施**：全部容器化（Docker Compose：MySQL + Redis + 后端 + 前端 nginx + Caddy）
 
 ## 前置要求
 
@@ -39,12 +40,13 @@
 
 ## 环境配置
 
-推荐直接运行初始化脚本生成 `.env`（自动填入随机 `ACCOUNT_SECRET_KEY` 与 `DB_PASSWORD`），再按需修改：
+推荐直接运行初始化脚本生成 `.env`（自动填入随机 `ACCOUNT_SECRET_KEY` 与 `DB_PASSWORD`，并复制 `auth.caddy` 模板），再按需修改：
 
 ```bash
-./scripts/init-env.ps1        # Windows PowerShell
-# sh scripts/init-env.sh      # macOS / Linux
+sh scripts/init-env.sh        # macOS / Linux / Windows Git Bash
 ```
+
+> Windows 用户：推荐使用 Git Bash 执行上述脚本（Docker Desktop 安装时通常会一并安装 Git Bash）。如果用 PowerShell，可手动复制 `.env.example` 为 `.env`、复制 `auth.caddy.example` 为 `auth.caddy`，然后按下方说明手动填入密钥。
 
 也可以手动复制 `.env.example` 为 `.env` 并修改，完整字段如下：
 
@@ -52,6 +54,10 @@
 # 应用
 PORT=3000
 NODE_ENV=development
+
+# 对外端口（由 Caddy 容器发布，Basic Auth 鉴权后转发 frontend）
+# 共享服务器上 8080 等常用端口可能被占用，部署前先确认端口空闲
+FRONTEND_PORT=18080
 
 # MySQL（以下为本地开发模式默认值；容器化部署时 DB_HOST/DB_PORT/DB_USERNAME 由 compose 覆盖）
 DB_HOST=localhost
@@ -85,11 +91,16 @@ CAS_PASSWORD=你的密码
 CAS_SERVICE=https://hdu.huitu.zhishulib.com/User/Index/hduCASLogin?forward=%2FSpace%2FCategory%2Flist%3Fcategory_id%3D591
 ```
 
+> Caddy Basic Auth 凭据**不放在 `.env` 中**：bcrypt 哈希中的 `$` 会被 Docker Compose 的变量插值截断，导致鉴权静默失效。凭据改为写在 `auth.caddy` 文件中（模板见 `auth.caddy.example`，init-env 脚本会自动复制一份），由 `Caddyfile` 原样 import，全程不经插值。
+
 > 账号现在通过前端「账号管理」区块添加（即时 CAS 验证后加密入库）。`CAS_USERNAME/CAS_PASSWORD` 只在首次启动且 accounts 表为空时起种子作用。
 
 ## 系统流程
 
 ```
+Caddy（Basic Auth 鉴权）
+   │  反代
+   ▼
 前端「账号管理」添加账号（即时 CAS 验证，成功后加密入库）
        │
 用户提交抢座任务（前端表单，绑定 accountId）
@@ -104,7 +115,8 @@ CAS_SERVICE=https://hdu.huitu.zhishulib.com/User/Index/hduCASLogin?forward=%2FSp
   TaskScheduler 计算延迟，推入 BullMQ 延迟队列（每个任务两个 job）
        │
        ├─（triggerAt 前 5 分钟）session-precheck
-       │    └─ 无条件 refreshSession(该账号)，失败推 session_precheck_failed 通知
+       │    ├─ 无条件 refreshSession(该账号)，失败推 session_precheck_failed 通知
+       │    └─ 严格模式下预解析座位号 → seatId（供盲抢使用）
        │
        ▼（到达 triggerAt 时间点）
   grab-seat job 唤醒 → GrabSeatProcessor → GrabSeatWorker.executeGrab()
@@ -114,46 +126,57 @@ CAS_SERVICE=https://hdu.huitu.zhishulib.com/User/Index/hduCASLogin?forward=%2FSp
   2. 状态更新为 running
   3. 时间窗口驱动的重试循环（3 分钟窗口，锚定 triggerAt）：
        │  高频段（前 15 秒）：1 秒/轮；低频段：3 秒/轮；限流退避 3 秒
+       │  未知错误累计 2 次 → 降级为低频继续（窗口耗尽才终止）
        │
-       ├─ searchSeats（获取最新座位快照）
-       ├─ 按优先级筛选候选座位（偏好 > 推荐 > 任意；strictMode 只取偏好）
-       ├─ 依次尝试 bookSeats
-       │    ├─ 成功 → 标记 success + 通知
-       │    ├─ 座位被占 → seat_taken 实时提醒 + 换下一个候选座位
-       │    ├─ 登录态失效 → 只重登该账号后重试
-       │    ├─ 未知错误 → 重试 2 次后终止
-       │    └─ 黑名单/不可恢复 → 标记 failed + 通知
-       └─ 循环期间可随时被用户终止（协作式退出，标记 cancelled）
+       ├─ [严格模式 + 有偏好] 盲抢（book-first）：
+       │    跳过 searchSeats，直接用预解析 seatId 调 bookSeats
+       │    WINDOW_NOT_OPEN 时 300ms 快速探测（10 次连中后退避）+ 随机抖动
+       │    触发 5s 偏移（blindStartOffsetMs），等待放号窗口实际打开
+       │
+       └─ [普通模式 / 严格模式无偏好] 正常流程：
+            ├─ searchSeats（获取最新座位快照）
+            ├─ 按优先级筛选候选座位（偏好 > 推荐 > 任意；strictMode 只取偏好）
+            ├─ 依次尝试 bookSeats
+            │    ├─ 成功 → 标记 success + 通知
+            │    ├─ 座位被占 → seat_taken 实时提醒 + 换下一个候选座位
+            │    ├─ 登录态失效 → 只重登该账号后重试
+            │    ├─ 未知错误 → 累计 2 次后降级为低频继续
+            │    └─ 黑名单/不可恢复 → 标记 failed + 通知
+            └─ 循环期间可随时被用户终止（协作式退出，标记 cancelled）
 ```
 
 ## 快速开始
 
 ### 方式一：Docker 一键启动（推荐）
 
-全新电脑 clone 仓库后只需两步（无需本地安装 Node.js / MySQL / Redis）：
+全新电脑 clone 仓库后只需三步（无需本地安装 Node.js / MySQL / Redis）：
 
-```powershell
-# 1. 一次性初始化：生成 .env（随机 ACCOUNT_SECRET_KEY 与 DB_PASSWORD，不进 git）
-./scripts/init-env.ps1        # Windows PowerShell
-# sh scripts/init-env.sh      # macOS / Linux
+```bash
+# 1. 一次性初始化：生成 .env（随机 ACCOUNT_SECRET_KEY 与 DB_PASSWORD）+ auth.caddy 模板
+sh scripts/init-env.sh
 
-# 2. 构建并启动全部四个服务（MySQL + Redis + 后端 + 前端）
+# 2. 设置 Basic Auth 密码（Caddy 入口鉴权，防止应用被公网裸奔）
+#    用 caddy 命令生成 bcrypt 哈希（也可在已安装 caddy 的机器上生成）：
+docker run --rm caddy:2-alpine caddy hash-password --plaintext "你的密码"
+#    将输出的哈希填入 auth.caddy（把 <username> 和 <bcrypt_hash> 替换为实际值）
+
+# 3. 构建并启动全部五个服务（MySQL + Redis + 后端 + 前端 + Caddy）
 docker compose up -d --build
 ```
 
-验证就绪（四个服务全部 `healthy`/`running`）：
+验证就绪（五个服务全部 `healthy`/`running`）：
 
 ```bash
 docker compose ps
 ```
 
-- 前端访问：http://localhost:18080（端口取自 `.env` 的 `FRONTEND_PORT`；API 经 nginx 同源反代，无需关心后端端口）
+- 访问地址：http://localhost:18080（端口取自 `.env` 的 `FRONTEND_PORT`；Caddy 是唯一对外入口，经 Basic Auth 鉴权后转发到前端，API 再由前端 nginx 同源反代）
 - 手机远程访问：手机与电脑连同一 Wi-Fi，访问 `http://<电脑局域网IP>:18080`（Windows 首次需在防火墙放行对应端口）
-- 端口占用说明：整套服务只占用宿主机 `FRONTEND_PORT` 一个端口，MySQL/Redis/后端均走 Docker 内网——适合部署到与他人共用的服务器；若该端口被占，改 `.env` 里的 `FRONTEND_PORT` 即可
+- 端口占用说明：整套服务只占用宿主机 `FRONTEND_PORT` 一个端口，MySQL/Redis/后端/前端 nginx 均走 Docker 内网——适合部署到与他人共用的服务器；若该端口被占，改 `.env` 里的 `FRONTEND_PORT` 即可
 - 首次启动因拉取镜像 + 安装依赖需数分钟；之后重启只需 `docker compose up -d`，通常 30 秒内就绪
-- 数据持久化在 `mysql-data` / `redis-data` 两个 Docker 卷中，`docker compose down` 不会丢数据（`down -v` 才会删除卷，慎用）
+- 数据持久化在 `mysql-data` / `redis-data` / `caddy-data` / `caddy-config` 四个 Docker 卷中，`docker compose down` 不会丢数据（`down -v` 才会删除卷，慎用）
 
-> `.env` 由初始化脚本生成后，CAS 凭据等其余配置可随时编辑 `.env` 补充，然后 `docker compose up -d` 重建后端生效。
+> `.env` 由初始化脚本生成后，CAS 凭据等其余配置可随时编辑 `.env` 补充，然后 `docker compose up -d` 重建后端生效。修改 `auth.caddy` 后需 `docker compose restart caddy` 生效。
 
 ### 方式二：本地开发模式（热重载）
 
@@ -219,7 +242,7 @@ npm run dev
 │   ├── cas/                          # CAS 统一认证登录（AES-128-ECB 加密 + Cookie 管理）
 │   ├── common/
 │   │   ├── constants/                # API 端点常量
-│   │   └── utils/                    # 时间窗口计算、form-urlencoded 编码、AES-256-GCM 加密
+│   │   └── utils/                    # 时间工具、form-urlencoded 编码、AES-256-GCM 加密
 │   ├── config/                       # 环境变量配置映射
 │   ├── modules/
 │   │   ├── account/                  # 账号管理（Entity/Service/Controller，即时 CAS 验证）
@@ -227,23 +250,31 @@ npm run dev
 │   │   │   ├── dto/                  # 请求/响应 DTO
 │   │   │   └── errors/               # 错误分类与重试判断
 │   │   ├── grab-task/                # 抢座任务 CRUD（Entity/Service/Controller）
-│   │   ├── scheduler/                # BullMQ 延迟队列调度（主任务 + session-precheck）
+│   │   ├── scheduler/                # BullMQ 延迟队列调度（主任务 + session-precheck + 预解析）
 │   │   ├── queue/                    # BullMQ 队列处理器（GrabSeatProcessor，concurrency=8）
-│   │   ├── grab-seat/                # 抢座执行核心（Worker + 选座策略）
-│   │   ├── session/                  # 多账号登录态保活（会话注册表 + 心跳错峰 + 自动重登）
-│   │   ├── notification/             # 通知服务（接口 + Mock 实现）
+│   │   ├── grab-seat/                # 抢座执行核心（Worker + 选座策略 + 盲抢预解析）
+│   │   │   └── strategies/           # 座位选择策略（优先级排序、严格模式过滤）
+│   │   ├── session/                  # 多账号登录态保活（real/mock 双实现 + 心跳错峰 + 自动重登）
+│   │   ├── notification/             # 通知服务（接口 + Mock 实现 + Entity）
 │   │   └── grab-attempt-log/         # 抢座尝试日志（含耗时埋点）
+│   ├── app.controller.ts             # 根路由（健康检查）
+│   ├── app.service.ts
 │   └── main.ts                       # 应用入口
 ├── frontend/
+│   ├── Dockerfile                    # 前端镜像（vite build + nginx）
+│   ├── nginx.conf                    # 前端 nginx 配置（API 反代）
 │   └── src/
 │       ├── api/                      # 后端 API 调用（grabTasks + accounts）
 │       ├── config/                   # 自习室配置
 │       ├── hooks/                    # 轮询任务状态 Hook
 │       └── utils/                    # 时间工具
-├── scripts/                          # 一次性脚本（登录验证/API 探测/init-env 初始化等）
+├── scripts/                          # 一次性脚本（init-env 初始化、登录验证、API 探测等）
+│   └── init-env.sh                   # 生成 .env + auth.caddy 模板（macOS/Linux/Git Bash）
+├── Caddyfile                         # Caddy 反代配置（Basic Auth + 转发 frontend）
+├── auth.caddy.example                # Basic Auth 凭据模板（init-env 复制为 auth.caddy）
 ├── Dockerfile                        # 后端镜像（多阶段构建）
-├── frontend/Dockerfile               # 前端镜像（vite build + nginx）
-├── docker-compose.yml                # MySQL + Redis + 后端 + 前端 四服务编排
+├── docker-compose.yml                # MySQL + Redis + 后端 + 前端 + Caddy 五服务编排
+├── docker-compose.dev.yml            # 开发模式覆盖（暴露 MySQL/Redis 端口到宿主机）
 ├── .env                              # 环境变量（init-env 脚本生成，不进 git）
 └── README.md
 ```
@@ -264,16 +295,20 @@ npm run dev
 ## Docker 常用命令
 
 ```bash
-docker compose up -d --build   # 构建并启动全部四个服务
-docker compose up -d           # 启动（镜像已构建时，秒级完成）
-docker compose ps              # 查看状态（healthy 即就绪）
-docker compose logs -f backend # 跟踪后端日志（Ctrl+C 退出）
-docker compose restart backend # 重启单个服务
-docker compose down            # 停止全部服务（数据卷保留）
+docker compose up -d --build     # 构建并启动全部五个服务
+docker compose up -d             # 启动（镜像已构建时，秒级完成）
+docker compose ps                # 查看状态（healthy 即就绪）
+docker compose logs -f backend   # 跟踪后端日志（Ctrl+C 退出）
+docker compose logs -f caddy     # 跟踪 Caddy 日志（Basic Auth 失败排查）
+docker compose restart backend   # 重启单个服务
+docker compose restart caddy     # 修改 auth.caddy 后重启 Caddy 生效
+docker compose down              # 停止全部服务（数据卷保留）
 ```
 
 ## 注意事项
 
+- Caddy Basic Auth 是应用的第一道防线，**部署前务必修改 `auth.caddy` 中的占位凭据**。init-env 生成的模板中用户名和 bcrypt 哈希都是占位符，不填入真实值 Caddy 会启动失败（fail-fast，不会无鉴权暴露）
+- Caddy 的 bcrypt 哈希必须通过 `auth.caddy` 文件挂载注入，不能写在 `.env` 里——compose 的变量插值会截断 `$` 开头的哈希段，导致鉴权静默失效
 - 开发环境下 TypeORM 开启了 `synchronize: true`，会自动同步表结构，**生产环境请关闭**
 - `NOTIFY_MODE` 当前仅支持 `mock`，微信推送尚未实现
 - `ACCOUNT_SECRET_KEY` 是账号密码的加密密钥，**切勿泄露或提交到版本控制**；一旦更换，已入库的账号密码将无法解密（需删除后重新添加）

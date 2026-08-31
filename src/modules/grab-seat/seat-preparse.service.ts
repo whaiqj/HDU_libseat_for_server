@@ -33,6 +33,16 @@ export interface PreparseEntry {
   resolvedAt: number;
 }
 
+/**
+ * 预解析执行结果
+ * - entry 非空：解析成功（含全部静态参数）
+ * - entry 为空 + failReason：解析失败及原因（透出给前端展示）
+ */
+export interface PreparseOutcome {
+  entry: PreparseEntry | null;
+  failReason?: string;
+}
+
 /** 缓存有效期：预检在 T-5min 执行，触发距预检不超过 5 分钟，10 分钟 TTL 留足余量 */
 const CACHE_TTL_MS = 10 * 60 * 1000;
 
@@ -57,9 +67,9 @@ export class SeatPreparseService {
 
   /**
    * 执行预解析并写缓存
-   * @returns 解析结果；searchSeats 失败或无可用房间时返回 null（调用方回退 search-first）
+   * @returns 解析结果；searchSeats 失败或无可用房间时 entry 为 null 并携带 failReason（调用方回退 search-first）
    */
-  async preparse(task: GrabTask): Promise<PreparseEntry | null> {
+  async preparse(task: GrabTask): Promise<PreparseOutcome> {
     let searchResult;
     try {
       searchResult = await this.hduLibraryClient.searchSeats(
@@ -76,15 +86,16 @@ export class SeatPreparseService {
         task.id,
       );
     } catch (e) {
+      const failReason = `座位搜索失败: ${(e as Error).message}`;
       this.logger.warn(
         `[预解析失败] taskId=${task.id} message=${(e as Error).message}，正式抢座时回退 search-first`,
       );
-      return null;
+      return { entry: null, failReason };
     }
 
     if (!searchResult.userInfoId) {
       this.logger.warn(`[预解析失败] taskId=${task.id} 未能提取 userInfoId`);
-      return null;
+      return { entry: null, failReason: '未能提取预约人 userInfoId' };
     }
 
     const rooms =
@@ -102,10 +113,13 @@ export class SeatPreparseService {
       this.resolvePreferenceSeats(rooms, searchResult.room.id, task);
 
     if (!roomId) {
-      this.logger.warn(
-        `[预解析失败] taskId=${task.id} 房间目录为空或指定房间 roomId=${task.roomId ?? '-'} 不在目录中`,
-      );
-      return null;
+      const failReason = task.roomId
+        ? `指定房间（roomId=${task.roomId}）不在房间目录中`
+        : rooms.length === 0
+          ? '房间目录为空'
+          : '偏好座位号在所有房间中均不存在';
+      this.logger.warn(`[预解析失败] taskId=${task.id} ${failReason}`);
+      return { entry: null, failReason };
     }
 
     const entry: PreparseEntry = {
@@ -126,7 +140,7 @@ export class SeatPreparseService {
         `座位映射=${seats.map((s) => `${s.title}→${s.seatId}`).join(',')} ` +
         `未解析=${unresolvedTitles.join(',') || '-'} 自动挑房=${autoPickedRoom}`,
     );
-    return entry;
+    return { entry };
   }
 
   /** 读取未过期的缓存条目 */

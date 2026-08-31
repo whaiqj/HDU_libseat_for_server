@@ -12,6 +12,7 @@ import { GrabTask, TaskStatus } from '../grab-task/entities/grab-task.entity';
 import { SearchSeatsResult } from '../hdu-library/dto/search-seats-result.dto';
 import type { IAuthKeeperService } from '../session/auth-keeper.service';
 import type { INotificationService } from '../notification/notification.service';
+import { buildTaskMeta } from '../notification/notification-templates';
 import { BookErrorCode } from '../hdu-library/errors/book-error-code.enum';
 import { ErrorCategory } from '../hdu-library/errors/error-category.enum';
 import { isRetryable } from '../hdu-library/errors/error-classifier';
@@ -134,6 +135,7 @@ export class GrabSeatWorker {
         taskId: task.id,
         type: 'grab_started',
         data: { categoryId: task.categoryId },
+        meta: buildTaskMeta(task),
       }),
       `notify(grab_started) taskId=${task.id}`,
     );
@@ -211,7 +213,7 @@ export class GrabSeatWorker {
       );
       this.logger.log(`[第 ${attempt} 次尝试开始] taskId=${task.id}`);
 
-      const result = await this.tryGrabOnce(task, notifiedTakenSeats);
+      const result = await this.tryGrabOnce(task, notifiedTakenSeats, attempt);
       this.logger.log(
         `[第 ${attempt} 次尝试结果] taskId=${task.id} success=${result.success} ` +
           `errorCategory=${result.errorCategory ?? '-'} errorMessage=${result.errorMessage ?? '-'}`,
@@ -350,7 +352,8 @@ export class GrabSeatWorker {
     }
     let entry = this.seatPreparse.get(task.id);
     if (!entry) {
-      entry = await this.seatPreparse.preparse(task);
+      const outcome = await this.seatPreparse.preparse(task);
+      entry = outcome.entry;
     }
     return entry && entry.seats.length > 0 ? entry : null;
   }
@@ -550,7 +553,7 @@ export class GrabSeatWorker {
         queue.push(queue.shift()!);
         if (!notifiedTakenSeats.has(seat.seatId)) {
           notifiedTakenSeats.add(seat.seatId);
-          void this.notifySeatTaken(task, seat.title);
+          void this.notifySeatTaken(task, seat.title, attempt);
         }
         if (
           await this.sleepInterruptible(
@@ -684,6 +687,7 @@ export class GrabSeatWorker {
   private async tryGrabOnce(
     task: GrabTask,
     notifiedTakenSeats: Set<string>,
+    retryRound: number,
   ): Promise<TryGrabOnceResult> {
     const timing: AttemptTiming = { searchStartMs: Date.now(), books: [] };
 
@@ -793,7 +797,7 @@ export class GrabSeatWorker {
           !notifiedTakenSeats.has(prefSeat.id)
         ) {
           notifiedTakenSeats.add(prefSeat.id);
-          void this.notifySeatTaken(task, prefSeat.title);
+          void this.notifySeatTaken(task, prefSeat.title, retryRound);
         }
       }
     }
@@ -892,7 +896,7 @@ export class GrabSeatWorker {
         const takenSeat = searchResult.seats.find((s) => s.id === seatId);
         if (takenSeat && !notifiedTakenSeats.has(seatId)) {
           notifiedTakenSeats.add(seatId);
-          void this.notifySeatTaken(task, takenSeat.title);
+          void this.notifySeatTaken(task, takenSeat.title, retryRound);
         }
         continue;
       }
@@ -975,6 +979,7 @@ export class GrabSeatWorker {
         seatTitle: result.seatTitle,
         categoryId: task.categoryId,
       },
+      meta: buildTaskMeta(task),
     });
 
     // 任务终态收尾日志
@@ -1005,6 +1010,7 @@ export class GrabSeatWorker {
       data: {
         errorReason: reason,
       },
+      meta: buildTaskMeta(task),
     });
 
     // 任务终态收尾日志
@@ -1048,12 +1054,13 @@ export class GrabSeatWorker {
   /**
    * 实时提醒用户：某个座位已被他人占用，任务仍在继续尝试
    * 1. 写任务 result.takenSeats → 前端轮询任务状态即可实时看到
-   * 2. 发 seat_taken 通知（mock 阶段落 notifications 表，后续接微信推送）
+   * 2. 发 seat_taken 通知（mock 阶段落 notifications 表，wxpusher 阶段推微信）
    * 通知失败不影响抢座主流程，单独 try/catch 兜底
    */
   private async notifySeatTaken(
     task: GrabTask,
     seatTitle: string,
+    retryRound: number,
   ): Promise<void> {
     try {
       await this.grabTaskService.recordSeatTaken(task.id, seatTitle);
@@ -1072,6 +1079,7 @@ export class GrabSeatWorker {
           seatTitle,
           categoryId: task.categoryId,
         },
+        meta: { ...buildTaskMeta(task), retryRound },
       });
     } catch (e) {
       this.logger.warn(

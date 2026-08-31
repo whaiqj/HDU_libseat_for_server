@@ -11,6 +11,7 @@ export type NotificationType =
   | 'grab_failed'
   | 'grab_started'
   | 'seat_taken'
+  | 'pre_reminder'
   | 'session_precheck_failed'
   | 'preparse_warning';
 

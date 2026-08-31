@@ -17,6 +17,39 @@ const SESSION_STALE_THRESHOLD_MS = 60 * 60 * 1000;
 
 const POLL_INTERVAL_MS = 2000;
 
+/** 本地日期字符串 "YYYY-MM-DD"（用户处于东八区，本地即北京时间） */
+function toLocalDateStr(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+/**
+ * 将 UTC+8 锚定的时间戳（秒）格式化为 "今天 20:00" / "明天 08:30" / "9月2日 20:00"
+ * 供任务状态卡片展示触发时刻
+ */
+function formatTriggerLabel(triggerAt: number): string {
+  // 时间戳由 toBeijingTimestamp（强制 UTC+8）生成，加 8h 后用 UTC 取值器读出北京时刻
+  const beijing = new Date(triggerAt * 1000 + 8 * 3600 * 1000);
+  const hh = String(beijing.getUTCHours()).padStart(2, "0");
+  const mm = String(beijing.getUTCMinutes()).padStart(2, "0");
+  const now = new Date();
+  const todayMidnight = toBeijingTimestamp(
+    now.getFullYear(),
+    now.getMonth() + 1,
+    now.getDate(),
+    0,
+    0,
+  );
+  const dayOffset = Math.floor((triggerAt - todayMidnight) / 86400);
+  const time = `${hh}:${mm}`;
+  if (dayOffset === 0) {
+    return `今天 ${time}`;
+  }
+  if (dayOffset === 1) {
+    return `明天 ${time}`;
+  }
+  return `${beijing.getUTCMonth() + 1}月${beijing.getUTCDate()}日 ${time}`;
+}
+
 function TaskStatusDisplay({ status }: { status: TaskStatus }) {
   const [task, setTask] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -75,6 +108,12 @@ function TaskStatusDisplay({ status }: { status: TaskStatus }) {
     );
   }
 
+  // 盲抢候选：严格模式 + 指定了座位偏好（是否真走盲抢还取决于预解析结果）
+  const blindCandidate = Boolean(task.strictMode && (task.seatPreference ?? []).length);
+  const preparse = task.result?.preparse;
+  // 预解析已明确失败 -> 大概率回退普通模式准点开抢；未执行/成功 -> 晚五秒
+  const blindMode = blindCandidate && preparse?.ok !== false;
+
   let cardClass = "status-card status-card-idle";
   if (task.status === "success") {
     cardClass = "status-card status-card-success";
@@ -90,7 +129,10 @@ function TaskStatusDisplay({ status }: { status: TaskStatus }) {
     <div className={cardClass}>
       <div>
         <strong>{status.username}:</strong>{" "}
-        {task.status === "pending" && "等待触发..."}
+        {task.status === "pending" &&
+          `在 ${formatTriggerLabel(task.triggerAt)} 时${
+            blindMode ? "晚五秒" : ""
+          }触发该抢座任务`}
         {task.status === "running" && `抢座中（已尝试 ${task.attempts} 次）`}
         {task.status === "success" && `✓ 预约成功！座位号：${task.result?.seatTitle}`}
         {task.status === "failed" && `✗ 预约失败：${task.result?.reason}`}
@@ -103,6 +145,25 @@ function TaskStatusDisplay({ status }: { status: TaskStatus }) {
             已被占用：{(task.result.takenSeats as string[]).join("、")}
           </div>
         )}
+      {task.status === "pending" && blindCandidate && (
+        <div className="status-taken">
+          {!preparse && "预解析将在触发前 5 分钟执行"}
+          {preparse?.ok === true && (
+            <>
+              盲抢就绪：{preparse.roomName} · 座位 {preparse.seatTitles?.join("、")}
+              {preparse.autoPickedRoom && "（多房间同名座位，已自动锁定该房间）"}
+              {Array.isArray(preparse.unresolvedTitles) &&
+                preparse.unresolvedTitles.length > 0 &&
+                `（${preparse.unresolvedTitles.join("、")} 不存在，已忽略）`}
+            </>
+          )}
+          {preparse?.ok === false && (
+            <>
+              预解析失败：{preparse.reason}。触发时将自动重试解析，仍失败则回退普通模式准点开抢
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -193,6 +254,30 @@ export default function App() {
 
   const hasRunningTasks = taskStatuses.length > 0;
 
+  // 预约日期可选范围：仅今天/明天/后天（每次渲染重算，页面跨天后自动刷新）
+  const nowDate = new Date();
+  const minDateStr = toLocalDateStr(nowDate);
+  const maxDateStr = toLocalDateStr(
+    new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate() + 2),
+  );
+
+  // 触发时间输入的实时提醒：填写的时刻未过 -> 今天触发；已过 -> 提交时将顺延到明天
+  // 随每次渲染重算（页面每 30s 轮询账号触发重渲染），时间流逝后提醒会自动翻转
+  const triggerDayLabel = (() => {
+    const m = /^(\d{2}):(\d{2})$/.exec(triggerTime);
+    if (!m) {
+      return null;
+    }
+    const ts = toBeijingTimestamp(
+      nowDate.getFullYear(),
+      nowDate.getMonth() + 1,
+      nowDate.getDate(),
+      Number(m[1]),
+      Number(m[2]),
+    );
+    return ts > Math.floor(Date.now() / 1000) ? "今天触发" : "明天触发";
+  })();
+
   const isFormInvalid = !date || selectedAccountIds.size === 0 ||
     Array.from(selectedAccountIds).some(id => {
       const pref = accountSeatPrefs.get(id) || "";
@@ -211,17 +296,47 @@ export default function App() {
       const [y, m, d] = date.split("-").map(Number);
       const beginTime = toBeijingTimestamp(y, m, d, startHour);
       const duration = (endHour - startHour) * 3600;
-      const [th, tmin] = triggerTime.split(":").map(Number);
 
+      const timeMatch = /^(\d{2}):(\d{2})$/.exec(triggerTime);
+      if (!timeMatch) {
+        setSubmitError("请设置抢座触发时间");
+        return;
+      }
+      const th = Number(timeMatch[1]);
+      const tmin = Number(timeMatch[2]);
+
+      // 触发时刻已过则顺延到明天同一时刻
       const now = new Date();
-      const ty = now.getFullYear();
-      const tmo = now.getMonth() + 1;
-      const td = now.getDate();
-      const triggerAt = toBeijingTimestamp(ty, tmo, td, th, tmin);
-
       const nowTs = Math.floor(Date.now() / 1000);
+      let triggerAt = toBeijingTimestamp(
+        now.getFullYear(),
+        now.getMonth() + 1,
+        now.getDate(),
+        th,
+        tmin,
+      );
+      let triggerDate = now;
+      let rolledToTomorrow = false;
       if (triggerAt <= nowTs) {
-        setSubmitError(`触发时间 ${triggerTime} 已过，请重新设置`);
+        const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+        triggerAt = toBeijingTimestamp(
+          tomorrow.getFullYear(),
+          tomorrow.getMonth() + 1,
+          tomorrow.getDate(),
+          th,
+          tmin,
+        );
+        triggerDate = tomorrow;
+        rolledToTomorrow = true;
+      }
+
+      // 预约日期不能早于触发日期：触发顺延到明天后，
+      // 今天及更早的预约时段在触发时已经开始/结束，任务必然失败
+      if (date < toLocalDateStr(triggerDate)) {
+        setSubmitError(
+          `触发时间为${rolledToTomorrow ? "明天" : "今天"} ${triggerTime}，` +
+            "预约日期不能早于触发日期，请调整预约日期或触发时间",
+        );
         return;
       }
 
@@ -459,6 +574,8 @@ export default function App() {
               id="date"
               className="input"
               type="date"
+              min={minDateStr}
+              max={maxDateStr}
               value={date}
               onChange={(e) => setDate(e.target.value)}
             />
@@ -490,10 +607,11 @@ export default function App() {
             <input
               id="triggerTime"
               className="input"
+              type="time"
               value={triggerTime}
               onChange={(e) => setTriggerTime(e.target.value)}
-              placeholder="20:00"
             />
+            {triggerDayLabel && <span className="hint">{triggerDayLabel}</span>}
           </div>
         </div>
 

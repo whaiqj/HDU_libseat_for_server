@@ -178,6 +178,25 @@ export class GrabTaskService {
   }
 
   /**
+   * 记录预解析结果（session-precheck 在触发前 5 分钟写入）
+   * 合并写入 result.preparse，前端轮询任务状态即可看到盲抢就绪情况：
+   * { ok: true, roomName, seatTitles, unresolvedTitles, autoPickedRoom } 或 { ok: false, reason }
+   */
+  async recordPreparse(
+    id: string,
+    preparse: Record<string, any>,
+  ): Promise<void> {
+    const task = await this.grabTaskRepository.findOne({ where: { id } });
+    if (!task) {
+      return;
+    }
+    const result = task.result ?? {};
+    await this.grabTaskRepository.update(id, {
+      result: { ...result, preparse },
+    });
+  }
+
+  /**
    * 终止任务（支持 pending 与 running 两个阶段）
    * - pending：从延迟队列移除 job，标记为 cancelled
    * - running：设置内存取消标记，worker 重试循环感知后立即退出
