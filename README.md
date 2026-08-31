@@ -1,25 +1,29 @@
 # HDU 图书馆座位自动抢座
 
-基于 NestJS 的杭电图书馆座位自动预约系统，通过 CAS 统一认证登录，支持多账号管理，在放号时间点自动抢座。前端经 **Caddy 反向代理** 对外提供服务，自带 Basic Auth 鉴权，避免 HTTP 明文暴露。
+基于 NestJS 的杭电图书馆座位自动预约系统，通过 CAS 统一认证登录，支持多账号批量管理，在放号时间点自动抢座。前端经 **Caddy 反向代理** 对外提供服务，自带 Basic Auth 鉴权，避免 HTTP 明文暴露。微信端通过 **WxPusher** Topic 广播推送抢座关键节点通知。
 
 ## 已实现功能
 
 - **多账号管理**：前端添加/删除/强制重登账号，添加时即时 CAS 验证（密码错误不入库）；密码 AES-256-GCM 加密入库，密钥来自环境变量；按 4 账号并发抢座设计（`concurrency=8`，未做账号数硬上限校验）
-- **CAS 统一认证登录**：通过学校 SSO 自动登录（AES-128-ECB 加密密码），每个账号各自维持独立登录态（会话注册表 + 每账号独立登录锁），心跳每账号 5 分钟错峰检测保活
-- **抢座任务管理**：REST API 创建、查询、终止抢座任务；同账号新任务覆盖旧 pending 任务；同账号已有 running 任务时拒绝创建；跨账号座位偏好重合给出软警告
-- **定时抢座调度**：BullMQ 延迟队列，在指定时间点精准触发；**放号前 5 分钟自动执行 session-precheck，无条件刷新该账号登录态**（失败推送 `session_precheck_failed` 通知，不取消主任务）；严格模式下同时预解析座位号为 seatId（供盲抢使用）
-- **自动抢座执行**：searchSeats 获取座位 → 按优先级选座（偏好 > 推荐 > 任意）→ bookSeats 提交预约；支持 **strictMode 严格模式**（只抢偏好座位，不降级）；严格模式下启用 **盲抢（book-first）** —— 跳过 searchSeats 直接用预解析的 seatId 提交预约，放号窗口未打开时以 300ms 间隔快速探测（10 次连续命中后退避），并加入随机抖动避免多账号同步触限流
+- **CAS 统一认证登录**：通过学校 SSO 自动登录（AES-128-ECB 加密密码），每个账号各自维持独立登录态（会话注册表 + 每账号独立登录锁），心跳每账号 5 分钟错峰检测保活；账号状态徽标细分为「正常 / 登录失败 / 登录已失效」
+- **RoomID 自习室分类体系**：明确了 `category_id`（业务分类，如自习室=591）→ `content_id`（业务子类型=3）→ `roomId`（具体房间 info.id，如二楼东=1557）→ `seatId`（座位 POIs[].id）的四级结构；所有自习室共用同一对 category/content，房间由 roomId 区分
+- **抢座任务管理**：REST API 创建、查询、终止抢座任务；同账号新任务覆盖旧 pending 任务；同账号已有 running 任务时拒绝创建；跨账号座位偏好重合给出软警告；任务锁定 roomId/roomName 后偏好座位号才能唯一解析为 seatId
+- **批量多账号提交**：前端可勾选多个账号同时创建任务，每账号独立设置座位偏好，支持「默认偏好 → 一键应用到全部」批量填充
+- **定时抢座调度**：BullMQ 延迟队列，在指定时间点精准触发；触发时刻已过则自动顺延到次日；**放号前 5 分钟自动执行 session-precheck，无条件刷新该账号登录态**（失败推送 `session_precheck_failed` 通知，不取消主任务）；严格模式下同时执行 **seat-preparse 座位预解析**（把偏好座位号 → seatId，供盲抢使用）
+- **座位预解析（preparse）**：触发前 5 分钟执行，根据房间配置和座位号解析出 seatId；未指定房间时多房间同名座位自动锁定一间；解析失败写入 `result.preparse`，触发时自动重试，仍失败则回退普通模式准点开抢
+- **自动抢座执行**：searchSeats 获取座位 → 按优先级选座（偏好 > 推荐 > 任意）→ bookSeats 提交预约；支持 **strictMode 严格模式**（只抢偏好座位，不降级）；严格模式下启用 **盲抢（book-first）** —— 跳过 searchSeats 直接用预解析的 seatId 提交预约，放号窗口未打开时以 300ms 间隔快速探测（10 次连续命中后退避），并加入随机抖动避免多账号同步触限流；盲抢带 5s 偏移（blindStartOffsetMs）等待放号窗口实际打开
 - **两段式重试**：时间窗口驱动（3 分钟窗口，以 triggerAt 为绝对锚点）——唤醒后前 15 秒高频探测（1 秒/轮），之后低频（3 秒/轮）；座位被占自动换座重试并实时提醒；限流错误单独退避 3 秒；未知错误累计 2 次后退化为低频继续重试（直到窗口耗尽）；黑名单/参数错误等不可恢复错误立即终止
 - **实时提醒**：偏好座位被占时发 `seat_taken` 通知并写入任务结果（`result.takenSeats`），前端轮询实时可见
-- **任务终止**：pending 阶段从队列移除、running 阶段协作式退出，均标记 `cancelled`
-- **模拟通知**：抢座结果写数据库 + 控制台日志（前端轮询查询）
-- **前端页面**：单页表单提交抢座任务 + 实时轮询任务状态 + 账号管理区块（状态徽标、30 秒轮询刷新）
+- **任务终止**：pending 阶段从队列移除、running 阶段协作式退出，均标记 `cancelled`；前端支持一键终止所有活跃任务
+- **WxPusher 微信推送**：7 类事件（pre_reminder / grab_started / seat_taken / grab_success / grab_failed / session_precheck_failed / preparse_warning），其中 5 类核心事件推送到微信（Markdown 模板），通过 Topic 广播模式分发；推送失败只打 warn 日志，绝不影响抢座主流程
+- **前端页面**：单页表单批量提交抢座任务 + 实时轮询任务状态 + 账号管理区块（状态徽标、30 秒轮询刷新）；**刷新页面后自动恢复所有活跃任务**（pending/running），不会丢失已提交的任务
 
 ## 未实现 / 待完成
 
-- **微信小程序订阅消息推送**：接口已预留（`INotificationService`），`NotificationModule` 当前仅注入 `MockNotificationService`，WeChat 实现待后续接入
 - **应用内鉴权系统**：账号与任务通过前端统一管理，无多用户注册/登录/细粒度权限控制；入口级鉴权由 Caddy Basic Auth 提供（单用户名 + 密码）
 - **账号数硬上限**：计划目标为最多 4 个账号，代码未实现数量校验（并发余量已按 4 账号设计）
+- **更多自习室支持**：目前前端仅配置并实测了「二楼东」自习室，二楼西 / 四楼等 roomId 已抓包确认但暂未启用（在 `frontend/src/config/rooms.ts` 中注释占位）
+- **微信小程序原生推送**：当前通过 WxPusher 服务号中转实现微信通知，原生小程序订阅消息推送待后续接入
 
 ## 技术栈
 
@@ -74,8 +78,14 @@ REDIS_PASSWORD=
 # BullMQ
 BULLMQ_PREFIX=library-seat
 
-# 通知模式（当前仅 mock 可用）
+# 通知模式：mock | wxpusher
+# mock：打日志 + 写 notifications 表；wxpusher：WxPusher Topic 广播推送到微信
 NOTIFY_MODE=mock
+
+# WxPusher 微信推送（NOTIFY_MODE=wxpusher 时生效）
+# appToken / topicId 在 WxPusher 后台获取，Topic 创建与订阅二维码为后台一次性操作
+WXPUSHER_APP_TOKEN=
+WXPUSHER_TOPIC_ID=
 
 # 图书馆 API 基地址
 LIBRARY_API_BASE_URL=https://hdu.huitu.zhishulib.com
@@ -97,14 +107,29 @@ CAS_SERVICE=https://hdu.huitu.zhishulib.com/User/Index/hduCASLogin?forward=%2FSp
 
 ## 系统流程
 
+### RoomID 自习室分类结构
+
+图书馆 API 的四级标识体系：
+
+```
+category_id（591）          业务分类：自习室预约
+  └─ content_id（3）        业务子类型
+       └─ roomId（1557）    具体房间 info.id，如「二楼东」
+            └─ seatId       单个座位 POIs[].id，如「400号座位」
+```
+
+所有自习室（二楼东/二楼西/四楼…）共用同一对 `category_id` / `content_id`，房间由 `roomId` 区分。任务锁定 `roomId` 后，偏好座位号才能唯一解析为 `seatId`（盲抢的前提）。
+
+### 端到端流程
+
 ```
 Caddy（Basic Auth 鉴权）
    │  反代
    ▼
 前端「账号管理」添加账号（即时 CAS 验证，成功后加密入库）
        │
-用户提交抢座任务（前端表单，绑定 accountId）
-       │
+用户批量勾选账号 + 填写预约设置（房间/日期/时段/偏好/触发时间/严格模式）
+       │  前端逐账号创建任务，触发时间已过则自动顺延次日
        ▼
   POST /grab-tasks 创建任务（状态: pending）
   ├─ 同账号已有 pending → 旧任务标记 failed（被新任务覆盖）
@@ -114,26 +139,29 @@ Caddy（Basic Auth 鉴权）
        ▼
   TaskScheduler 计算延迟，推入 BullMQ 延迟队列（每个任务两个 job）
        │
-       ├─（triggerAt 前 5 分钟）session-precheck
-       │    ├─ 无条件 refreshSession(该账号)，失败推 session_precheck_failed 通知
-       │    └─ 严格模式下预解析座位号 → seatId（供盲抢使用）
+       ├─（triggerAt 前 5 分钟）precheck job
+       │    ├─ session-precheck：无条件 refreshSession(该账号)，失败推 session_precheck_failed 通知
+       │    └─ seat-preparse（严格模式 + 有偏好）：座位号 → seatId 预解析
+       │         ├─ 已指定 roomId → 直接解析
+       │         ├─ 未指定 roomId → 多房间同名座位自动锁定一间
+       │         └─ 解析失败 → 写入 result.preparse，触发时重试，仍失败回退普通模式
        │
        ▼（到达 triggerAt 时间点）
   grab-seat job 唤醒 → GrabSeatProcessor → GrabSeatWorker.executeGrab()
        │
        ▼
-  1. 通知：任务开始
+  1. 通知：pre_reminder（提前提醒）+ grab_started（任务开始）
   2. 状态更新为 running
   3. 时间窗口驱动的重试循环（3 分钟窗口，锚定 triggerAt）：
        │  高频段（前 15 秒）：1 秒/轮；低频段：3 秒/轮；限流退避 3 秒
        │  未知错误累计 2 次 → 降级为低频继续（窗口耗尽才终止）
        │
-       ├─ [严格模式 + 有偏好] 盲抢（book-first）：
+       ├─ [严格模式 + 有偏好 + 预解析成功] 盲抢（book-first）：
        │    跳过 searchSeats，直接用预解析 seatId 调 bookSeats
        │    WINDOW_NOT_OPEN 时 300ms 快速探测（10 次连中后退避）+ 随机抖动
        │    触发 5s 偏移（blindStartOffsetMs），等待放号窗口实际打开
        │
-       └─ [普通模式 / 严格模式无偏好] 正常流程：
+       └─ [普通模式 / 严格模式无偏好 / 预解析失败] 正常流程：
             ├─ searchSeats（获取最新座位快照）
             ├─ 按优先级筛选候选座位（偏好 > 推荐 > 任意；strictMode 只取偏好）
             ├─ 依次尝试 bookSeats
@@ -144,6 +172,18 @@ Caddy（Basic Auth 鉴权）
             │    └─ 黑名单/不可恢复 → 标记 failed + 通知
             └─ 循环期间可随时被用户终止（协作式退出，标记 cancelled）
 ```
+
+### 通知事件
+
+| 事件类型 | 微信推送 | 说明 |
+|----------|----------|------|
+| `pre_reminder` | ✓ | 抢座开始前提醒 |
+| `grab_started` | ✓ | 抢座任务开始执行 |
+| `seat_taken` | ✓ | 偏好座位被占，自动换座重试 |
+| `grab_success` | ✓ | 预约成功，附座位号与时段 |
+| `grab_failed` | ✓ | 预约失败，附失败原因 |
+| `session_precheck_failed` | ✗ | 预检查登录态刷新失败（仅日志 + 数据库） |
+| `preparse_warning` | ✗ | 座位预解析异常（仅日志 + 数据库） |
 
 ## 快速开始
 
@@ -230,9 +270,10 @@ npm run dev
 
 1. 配置 `.env`（尤其 `ACCOUNT_SECRET_KEY`），启动后端与前端
 2. 前端展开「账号管理」→ 输入学号 + 密码 →「添加并验证」（CAS 登录需数秒，失败会显示具体原因）
-3. 主表单选择账号，填写预约日期、时间段、座位偏好（逗号分隔）、触发时间，按需勾选严格模式
-4. 提交任务后前端每 2 秒轮询任务状态；放号前 5 分钟系统自动刷新登录态，到点自动抢座
-5. 进行中可随时点「终止抢座」
+3. 主表单勾选一个或多个账号，选择自习室、预约日期、时间段，填写座位偏好（每账号独立，也可用「默认偏好 → 应用到全部」批量填充），设置触发时间，按需勾选严格模式
+4. 提交后前端逐账号创建任务，每 2 秒轮询任务状态；放号前 5 分钟系统自动刷新登录态并预解析座位，到点自动抢座
+5. 进行中可随时点「终止所有任务」一键取消；刷新页面后活跃任务（pending/running）会自动恢复显示
+6. 如需微信推送：在 WxPusher 后台创建 Topic，将 `WXPUSHER_APP_TOKEN` 和 `WXPUSHER_TOPIC_ID` 填入 `.env`，并把 `NOTIFY_MODE` 改为 `wxpusher`，重启后端生效
 
 ## 项目结构
 
@@ -241,21 +282,23 @@ npm run dev
 ├── src/
 │   ├── cas/                          # CAS 统一认证登录（AES-128-ECB 加密 + Cookie 管理）
 │   ├── common/
-│   │   ├── constants/                # API 端点常量
-│   │   └── utils/                    # 时间工具、form-urlencoded 编码、AES-256-GCM 加密
+│   │   ├── constants/                # API 端点常量 + 自习室全局常量（category_id/content_id/roomId 体系）
+│   │   └── utils/                    # 时间工具、form-urlencoded 编码、AES-256-GCM 加密、时间窗口工具
 │   ├── config/                       # 环境变量配置映射
 │   ├── modules/
 │   │   ├── account/                  # 账号管理（Entity/Service/Controller，即时 CAS 验证）
 │   │   ├── hdu-library/              # 图书馆 API 客户端（searchSeats/bookSeats，按账号取凭证）
 │   │   │   ├── dto/                  # 请求/响应 DTO
 │   │   │   └── errors/               # 错误分类与重试判断
-│   │   ├── grab-task/                # 抢座任务 CRUD（Entity/Service/Controller）
-│   │   ├── scheduler/                # BullMQ 延迟队列调度（主任务 + session-precheck + 预解析）
+│   │   ├── grab-task/                # 抢座任务 CRUD（Entity/Service/Controller，含 roomId 锁定）
+│   │   ├── scheduler/                # BullMQ 延迟队列调度（主任务 + session-precheck + seat-preparse）
 │   │   ├── queue/                    # BullMQ 队列处理器（GrabSeatProcessor，concurrency=8）
-│   │   ├── grab-seat/                # 抢座执行核心（Worker + 选座策略 + 盲抢预解析）
-│   │   │   └── strategies/           # 座位选择策略（优先级排序、严格模式过滤）
+│   │   ├── grab-seat/                # 抢座执行核心（Worker + 选座策略 + 盲抢预解析服务）
+│   │   │   ├── strategies/           # 座位选择策略（优先级排序、严格模式过滤）
+│   │   │   └── seat-preparse.service.ts  # 座位号 → seatId 预解析（盲抢前置）
 │   │   ├── session/                  # 多账号登录态保活（real/mock 双实现 + 心跳错峰 + 自动重登）
-│   │   ├── notification/             # 通知服务（接口 + Mock 实现 + Entity）
+│   │   ├── notification/             # 通知服务（接口 + Mock + WxPusher 实现 + 模板 + Entity）
+│   │   │   └── notification-templates.ts  # 5 类微信 Markdown 消息模板
 │   │   └── grab-attempt-log/         # 抢座尝试日志（含耗时埋点）
 │   ├── app.controller.ts             # 根路由（健康检查）
 │   ├── app.service.ts
@@ -265,7 +308,7 @@ npm run dev
 │   ├── nginx.conf                    # 前端 nginx 配置（API 反代）
 │   └── src/
 │       ├── api/                      # 后端 API 调用（grabTasks + accounts）
-│       ├── config/                   # 自习室配置
+│       ├── config/                   # 自习室配置（roomId 列表）
 │       ├── hooks/                    # 轮询任务状态 Hook
 │       └── utils/                    # 时间工具
 ├── scripts/                          # 一次性脚本（init-env 初始化、登录验证、API 探测等）
@@ -310,9 +353,10 @@ docker compose down              # 停止全部服务（数据卷保留）
 - Caddy Basic Auth 是应用的第一道防线，**部署前务必修改 `auth.caddy` 中的占位凭据**。init-env 生成的模板中用户名和 bcrypt 哈希都是占位符，不填入真实值 Caddy 会启动失败（fail-fast，不会无鉴权暴露）
 - Caddy 的 bcrypt 哈希必须通过 `auth.caddy` 文件挂载注入，不能写在 `.env` 里——compose 的变量插值会截断 `$` 开头的哈希段，导致鉴权静默失效
 - 开发环境下 TypeORM 开启了 `synchronize: true`，会自动同步表结构，**生产环境请关闭**
-- `NOTIFY_MODE` 当前仅支持 `mock`，微信推送尚未实现
+- `NOTIFY_MODE` 支持 `mock`（默认）与 `wxpusher` 两种模式；切换到 WxPusher 后需同时配置 `WXPUSHER_APP_TOKEN` 和 `WXPUSHER_TOPIC_ID`
 - `ACCOUNT_SECRET_KEY` 是账号密码的加密密钥，**切勿泄露或提交到版本控制**；一旦更换，已入库的账号密码将无法解密（需删除后重新添加）
 - `.env` 中的凭据配置同样**切勿提交到版本控制**
-- 目前前端仅配置了「二楼东」自习室，其他自习室的 `roomId`/`categoryId` 需抓包确认后补充到 `frontend/src/config/rooms.ts`
+- 目前前端仅配置并实测了「二楼东」自习室，二楼西 / 四楼等 `roomId` 已抓包确认但暂未启用（在 `frontend/src/config/rooms.ts` 中注释占位，验证无误后去掉注释即可）
+- 所有自习室共用同一对 `category_id=591` / `content_id=3`，房间由 `roomId`（`info.id`）区分，详见 [RoomID 自习室分类结构](#roomid-自习室分类结构)
 - 错误分类的关键词匹配基于有限样本，实际运行时可能遇到未分类的错误文案落入 `UNKNOWN` 类别（限制重试 2 次后终止）
 - 图书馆侧限流按账号还是按 IP 计算属前提假设（`scripts/phase2.5-concurrent-experiment.ts` 为双账号并发验证脚本），多账号并发时注意观察限流错误码
