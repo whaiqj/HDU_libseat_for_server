@@ -16,6 +16,20 @@ import { classifyError } from './errors/error-classifier';
 import type { IAuthKeeperService } from '../session/auth-keeper.service';
 import { LIBRARY_API } from '../../common/constants/api-endpoints';
 import { buildFormBody, FORM_CONTENT_TYPE } from '../../common/utils/form-urlencoded.util';
+import type { AppointmentMessageItem } from './dto/appoint-messages.dto';
+
+/**
+ * 明确登录失效错误
+ * 仅在以下两种场景抛出（严格保守判定，其余异常一律不抛此错误）：
+ * 1. 接口明确返回 is_login = false
+ * 2. 3xx 重定向且 Location 包含 sso.hdu.edu.cn / login 登录页
+ */
+export class SessionExpiredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SessionExpiredError';
+  }
+}
 
 /**
  * bookSeats 的 Api-Token 签名：base64(md5(canonical_string))
@@ -53,6 +67,7 @@ export class HduLibraryClientService {
   // RTT 滑动窗口：search 和 book 是两种量级的耗时分布，分开追踪，避免互相污染估计值
   private readonly searchRttWindow: number[] = [];
   private readonly bookRttWindow: number[] = [];
+  private readonly messageRttWindow: number[] = [];
   private readonly RTT_WINDOW_SIZE = 5;
   private readonly MIN_TIMEOUT_MS = 8_000;   // 硬下限 8 秒
   private readonly MAX_TIMEOUT_MS = 15_000;  // 硬上限 15 秒
@@ -427,6 +442,104 @@ export class HduLibraryClientService {
       default:
         return BookErrorCode.UNKNOWN;
     }
+  }
+
+  /**
+   * 获取图书馆预约消息列表（全量消息，不做过滤）
+   *
+   * Session 失效判定（严格保守，4.1 规则）：
+   * - 仅当接口明确返回 is_login = false，或 3xx 重定向且 Location 指向 SSO 登录页时，
+   *   抛出 SessionExpiredError（由上层决定是否刷新会话）
+   * - 网络超时、5xx、普通 302 重定向（非登录页）、业务异常、数据为空等一切其他异常：
+   *   仅打 warn 日志、返回空数组，绝不抛 SessionExpiredError，杜绝误刷新
+   */
+  async getAppointMessages(accountId: string): Promise<AppointmentMessageItem[]> {
+    const messageStartMs = Date.now();
+    try {
+      const response = await firstValueFrom(
+        this.httpService.get(`${this.baseUrl}${LIBRARY_API.APPOINT_MESSAGES}`, {
+          headers: {
+            ...this.getAuthHeaders(accountId),
+            Accept: 'application/json, text/plain, */*',
+          },
+          timeout: this.computeAdaptiveTimeout(this.messageRttWindow),
+        }),
+      );
+      this.recordRtt(this.messageRttWindow, Date.now() - messageStartMs);
+
+      const raw = response.data;
+
+      // 保守判定：仅明确的 is_login = false 才视为登录失效
+      if (raw?.is_login === false) {
+        throw new SessionExpiredError(
+          `appointMessages 明确返回 is_login=false accountId=${accountId}`,
+        );
+      }
+
+      return this.transformAppointMessages(raw);
+    } catch (error) {
+      if (error instanceof SessionExpiredError) {
+        throw error;
+      }
+
+      const status = (error as any)?.response?.status;
+      const location = String((error as any)?.response?.headers?.location ?? '');
+
+      // 3xx 重定向：仅 Location 指向 SSO 登录页才判定为登录失效
+      if (status >= 300 && status < 400) {
+        if (
+          location.includes('sso.hdu.edu.cn') ||
+          location.toLowerCase().includes('login')
+        ) {
+          throw new SessionExpiredError(
+            `appointMessages 3xx 跳转 SSO 登录页 accountId=${accountId} status=${status} location=${location}`,
+          );
+        }
+        // 普通 302 重定向（非登录页）：保守处理，仅告警，不刷新会话
+        this.logger.warn(
+          `[appointMessages 普通 3xx 重定向·保守跳过] accountId=${accountId} status=${status} location=${location}`,
+        );
+        return [];
+      }
+
+      // 网络超时 / 5xx / 业务异常 / 未知异常：一律保守处理，仅告警，不刷新会话
+      this.logger.warn(
+        `[appointMessages 请求异常·保守跳过] accountId=${accountId} status=${status ?? 'N/A'} message=${(error as Error).message}`,
+      );
+      return [];
+    }
+  }
+
+  /**
+   * 解析 appointMessages 响应为标准化消息数组
+   * 字段存在性校验：消息列表字段缺失或非数组时返回空数组
+   */
+  private transformAppointMessages(raw: any): AppointmentMessageItem[] {
+    const content = raw?.content;
+    const items: any[] =
+      content?.defaultItems ?? content?.items ?? content?.list ?? content?.data;
+
+    if (!Array.isArray(items)) {
+      this.logger.warn('[appointMessages 响应无消息列表字段，视为空消息]');
+      return [];
+    }
+
+    return items.map((item: any) => {
+      const url = String(item?.url ?? '');
+      return {
+        time: String(item?.time ?? ''),
+        title: String(item?.title ?? ''),
+        desc: String(item?.desc ?? ''),
+        url,
+        bookingId: this.extractBookingId(url),
+      };
+    });
+  }
+
+  /** 从消息 url 中提取 bookingId；无法提取时返回 null */
+  private extractBookingId(url: string): string | null {
+    const match = url.match(/bookingId=([^&]+)/);
+    return match ? match[1] : null;
   }
 
   /**

@@ -125,6 +125,16 @@ export class GrabSeatWorker {
    *                 绝不用下游时间点冒充唤醒时刻。
    */
   async executeGrab(task: GrabTask, wakeupMs?: number): Promise<void> {
+    try {
+      await this.runGrabTask(task, wakeupMs);
+    } finally {
+      // 任务执行生命周期结束（成功/失败/运行中取消/异常退出）统一清理预解析缓存，
+      // 防止终态后条目常驻进程内存（RAM 缓存泄漏）
+      this.seatPreparse.invalidate(task.id);
+    }
+  }
+
+  private async runGrabTask(task: GrabTask, wakeupMs?: number): Promise<void> {
     const startMs = Date.now();
     this.logger.log(`[任务开始] taskId=${task.id} accountId=${task.accountId}`);
 

@@ -3,7 +3,8 @@
  */
 export interface NotificationPayload {
   userId: string;
-  taskId: string;
+  /** 关联抢座任务（消息转发类通知无任务上下文，允许为空） */
+  taskId?: string;
   type:
     | 'grab_success'
     | 'grab_failed'
@@ -11,11 +12,24 @@ export interface NotificationPayload {
     | 'seat_taken'
     | 'pre_reminder'
     | 'session_precheck_failed'
-    | 'preparse_warning';
+    | 'preparse_warning'
+    | 'appoint_message';
   data: {
     seatTitle?: string;
     categoryId?: string;
     errorReason?: string;
+    /** 图书馆预约消息标题 */
+    messageTitle?: string;
+    /** 图书馆预约消息描述 */
+    messageDesc?: string;
+    /** 图书馆预约消息时间 */
+    messageTime?: string;
+    /** 图书馆预约消息关联预约 id（无 bookingId 时为占位符 'none'） */
+    bookingId?: string;
+    /** 消息分级：normal / urgent / alert */
+    messageLevel?: string;
+    /** 消息表情 */
+    messageEmoji?: string;
   };
   /**
    * 任务级上下文（房间 / 日期 / 时间段 / 重试轮次）。

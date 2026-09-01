@@ -20,14 +20,14 @@ export class MockNotificationService implements INotificationService {
 
   async notify(payload: NotificationPayload): Promise<void> {
     this.logger.log(
-      `[通知] userId=${payload.userId} taskId=${payload.taskId} type=${payload.type}`,
+      `[通知] userId=${payload.userId} taskId=${payload.taskId ?? '-'} type=${payload.type}`,
     );
     this.logger.log(`[通知详情] ${JSON.stringify(payload.data)}`);
 
     // 写 notifications 表记录
     const record = this.notificationRepo.create({
       userId: payload.userId,
-      taskId: payload.taskId,
+      taskId: payload.taskId ?? null,
       type: payload.type,
       data: payload.data,
     });

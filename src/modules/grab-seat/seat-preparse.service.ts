@@ -133,6 +133,14 @@ export class SeatPreparseService {
       autoPickedRoom,
       resolvedAt: Date.now(),
     };
+    // TTL 兜底清扫：终态主动清理（worker finally）覆盖不到"预检写缓存后任务
+    // 在 pending 阶段被取消/覆盖而从未执行"的路径，在每次写入新缓存前清扫
+    // 已过期条目，防止进程内缓存随历史任务缓慢增长
+    for (const [cachedTaskId, cached] of this.cache) {
+      if (Date.now() - cached.resolvedAt > CACHE_TTL_MS) {
+        this.cache.delete(cachedTaskId);
+      }
+    }
     this.cache.set(task.id, entry);
 
     this.logger.log(

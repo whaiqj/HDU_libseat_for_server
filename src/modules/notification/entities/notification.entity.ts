@@ -13,7 +13,8 @@ export type NotificationType =
   | 'seat_taken'
   | 'pre_reminder'
   | 'session_precheck_failed'
-  | 'preparse_warning';
+  | 'preparse_warning'
+  | 'appoint_message';
 
 /**
  * 通知记录表
@@ -28,9 +29,9 @@ export class Notification {
   @Column({ type: 'varchar', length: 64 })
   userId: string;
 
-  /** 关联抢座任务 */
-  @Column({ type: 'varchar', length: 64 })
-  taskId: string;
+  /** 关联抢座任务（消息转发类通知无任务上下文，允许为空） */
+  @Column({ type: 'varchar', length: 64, nullable: true })
+  taskId: string | null;
 
   /** 通知类型 */
   @Column({ type: 'varchar', length: 32 })
@@ -42,6 +43,12 @@ export class Notification {
     seatTitle?: string;
     categoryId?: string;
     errorReason?: string;
+    messageTitle?: string;
+    messageDesc?: string;
+    messageTime?: string;
+    bookingId?: string;
+    messageLevel?: string;
+    messageEmoji?: string;
   } | null;
 
   @CreateDateColumn()

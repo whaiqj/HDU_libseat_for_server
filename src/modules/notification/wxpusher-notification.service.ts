@@ -12,8 +12,10 @@ import {
   buildSeatTakenMessage,
   buildSuccessMessage,
   buildFailedMessage,
+  buildAppointMessageNotification,
   NotificationTemplateData,
 } from './notification-templates';
+import { MessageLevel } from '../hdu-library/dto/appoint-messages.dto';
 
 /** WxPusher 消息推送接口（Topic 广播模式） */
 const WXPUSHER_SEND_URL = 'https://wxpusher.zjiecode.com/api/send/message';
@@ -44,8 +46,11 @@ export class WxPusherNotificationService implements INotificationService {
 
   async notify(payload: NotificationPayload): Promise<void> {
     try {
-      const templateData = await this.toTemplateData(payload);
-      const markdown = this.render(payload.type, templateData);
+      // 图书馆预约消息转发：走分级消息模板渲染分支
+      const markdown =
+        payload.type === 'appoint_message'
+          ? await this.renderAppointMessage(payload)
+          : this.render(payload.type, await this.toTemplateData(payload));
       if (!markdown) {
         // session_precheck_failed / preparse_warning 等非 5 类事件不推微信
         return;
@@ -53,9 +58,33 @@ export class WxPusherNotificationService implements INotificationService {
       await this.send(markdown, payload.taskId);
     } catch (e) {
       this.logger.warn(
-        `[WxPusher 推送失败] taskId=${payload.taskId} type=${payload.type} message=${(e as Error).message}`,
+        `[WxPusher 推送失败] taskId=${payload.taskId ?? '-'} type=${payload.type} message=${(e as Error).message}`,
       );
     }
+  }
+
+  /**
+   * 图书馆预约消息渲染分支：按消息分级（normal/urgent/alert）渲染统一模板
+   * 消息无 taskId（任务无关），账号名按 payload.userId（即 accountId）查询
+   */
+  private async renderAppointMessage(
+    payload: NotificationPayload,
+  ): Promise<string> {
+    const data = payload.data ?? {};
+    if (!data.messageTitle) {
+      this.logger.warn(
+        `[appoint_message 缺少 messageTitle，跳过推送] userId=${payload.userId}`,
+      );
+      return '';
+    }
+    return buildAppointMessageNotification({
+      accountUsername: await this.resolveUsername(payload.userId),
+      title: data.messageTitle,
+      desc: data.messageDesc ?? '',
+      time: data.messageTime ?? '',
+      level: (data.messageLevel as MessageLevel) ?? MessageLevel.NORMAL,
+      emoji: data.messageEmoji ?? '📨',
+    });
   }
 
   /** 把 payload 组装为模板统一入参，账号名按 payload.userId（即 accountId）查询 */
@@ -63,7 +92,7 @@ export class WxPusherNotificationService implements INotificationService {
     payload: NotificationPayload,
   ): Promise<NotificationTemplateData> {
     return {
-      taskId: payload.taskId,
+      taskId: payload.taskId ?? '',
       accountUsername: await this.resolveUsername(payload.userId),
       room: payload.meta?.room ?? '未指定',
       date: payload.meta?.date ?? '',
@@ -110,9 +139,9 @@ export class WxPusherNotificationService implements INotificationService {
   }
 
   /** 调 WxPusher API 发送 Markdown 消息（Topic 广播），失败抛出由 notify 兜底 */
-  private async send(markdown: string, taskId: string): Promise<void> {
+  private async send(markdown: string, taskId?: string): Promise<void> {
     if (!this.appToken || !this.topicId) {
-      this.logger.warn(`[WxPusher 未配置] 跳过推送 taskId=${taskId}`);
+      this.logger.warn(`[WxPusher 未配置] 跳过推送 taskId=${taskId ?? '-'}`);
       return;
     }
 

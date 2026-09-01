@@ -1,5 +1,6 @@
 import { GrabTask } from '../grab-task/entities/grab-task.entity';
 import type { NotificationMeta } from './notification.service';
+import { MessageLevel } from '../hdu-library/dto/appoint-messages.dto';
 
 /**
  * 通知模板渲染所需的统一数据。
@@ -108,5 +109,44 @@ export function buildFailedMessage(d: NotificationTemplateData): string {
     `- **房间**：${d.room}`,
     `- **时间**：${d.date} ${d.timeStart} - ${d.timeEnd}`,
     `- **失败原因**：${d.failReason ?? '未知原因'}`,
+  ].join('\n');
+}
+
+/** 图书馆预约消息分级模板渲染所需的统一数据 */
+export interface AppointMessageTemplateData {
+  accountUsername: string;
+  /** 消息标题 */
+  title: string;
+  /** 消息描述 */
+  desc: string;
+  /** 消息时间（原始字符串） */
+  time: string;
+  /** 消息分级 */
+  level: MessageLevel;
+  /** 消息表情 */
+  emoji: string;
+}
+
+/**
+ * 图书馆预约消息分级模板（normal / urgent / alert）
+ * 所有消息类型共用同一模板，按分级渲染标题头，无需为新消息类型单独编写模板
+ */
+export function buildAppointMessageNotification(
+  d: AppointMessageTemplateData,
+): string {
+  const header =
+    d.level === MessageLevel.ALERT
+      ? '## ⚠️ 图书馆消息（重要警告）'
+      : d.level === MessageLevel.URGENT
+        ? '## ⏰ 图书馆消息（加急）'
+        : '## 🔔 图书馆消息';
+
+  return [
+    header,
+    '',
+    `- **账号**：${d.accountUsername}`,
+    `- **标题**：${d.emoji} ${d.title}`,
+    `- **时间**：${d.time}`,
+    `- **内容**：${d.desc}`,
   ].join('\n');
 }

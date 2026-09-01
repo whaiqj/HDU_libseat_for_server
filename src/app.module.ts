@@ -12,6 +12,7 @@ import { GrabSeatModule } from './modules/grab-seat/grab-seat.module';
 import { SessionModule } from './modules/session/session.module';
 import { NotificationModule } from './modules/notification/notification.module';
 import { AccountModule } from './modules/account/account.module';
+import { MessageForwardModule } from './modules/message-forward/message-forward.module';
 
 @Module({
   imports: [
@@ -41,6 +42,7 @@ import { AccountModule } from './modules/account/account.module';
     SessionModule,
     NotificationModule,
     AccountModule,
+    MessageForwardModule,
   ],
   controllers: [AppController],
   providers: [AppService],
