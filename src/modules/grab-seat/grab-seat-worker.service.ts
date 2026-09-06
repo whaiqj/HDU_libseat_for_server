@@ -794,11 +794,51 @@ export class GrabSeatWorker {
       return { ...result, timing };
     }
 
+    // 任务指定 roomId 时锁定目标房间座位表（与盲抢预解析/confirmSeatState 一致）：
+    // search 推荐房间在多房间分类下会轮换，直接用推荐房间会查错房间
+    // （同名座位号在别的房间被占，会被误报占座并分配到别的房间的座位）
+    let roomSeats = searchResult.seats;
+    if (task.roomId) {
+      const pinned =
+        searchResult.allRooms?.find((r) => r.id === task.roomId) ??
+        (searchResult.room.id === task.roomId
+          ? {
+              id: searchResult.room.id,
+              name: searchResult.room.name,
+              seats: searchResult.seats,
+            }
+          : null);
+      if (!pinned) {
+        // 指定房间不在目录中：目录来自稳定的 allContent，重试也不会变化，
+        // 按不可重试错误终止任务，避免抢到非目标房间的座位
+        const result: GrabResult = {
+          success: false,
+          errorCategory: ErrorCategory.PARAM_INVALID,
+          errorMessage: `指定房间（roomId=${task.roomId}）不在房间目录中`,
+        };
+        // 任务即将终止，此后不再发请求 → 阻塞落盘
+        await this.writeAttemptLog(
+          {
+            taskId: task.id,
+            accountId: task.accountId,
+            seatId: '-',
+            result: AttemptResult.FAILED,
+            errorMsg: result.errorMessage,
+            searchStartMs: timing.searchStartMs,
+            searchEndMs: timing.searchEndMs,
+          },
+          true,
+        );
+        return { ...result, timing };
+      }
+      roomSeats = pinned.seats;
+    }
+
     // 实时提醒：偏好座位在快照中已被占用时立即通知（只提示存在于本房间、但状态非空闲的）
     // 严格模式下候选会为空，用户正是靠这条消息知道"我要的座位没了"
     // fire-and-forget：此后还要继续发起候选座位请求，通知不阻塞热路径
     if (task.seatPreference?.length) {
-      const seatByTitle = new Map(searchResult.seats.map((s) => [s.title, s]));
+      const seatByTitle = new Map(roomSeats.map((s) => [s.title, s]));
       for (const prefTitle of task.seatPreference) {
         const prefSeat = seatByTitle.get(prefTitle);
         if (
@@ -813,8 +853,10 @@ export class GrabSeatWorker {
     }
 
     // 按优先级筛选候选座位（用户偏好 > 系统推荐 > 任意可用座位）
+    // 指定 roomId 时用锁定房间的座位表；推荐座位 ID 来自推荐房间，
+    // 与其他房间的座位 ID 不会重合，会被 availableIds 自然过滤
     const candidates = this.seatSelection.selectCandidates(
-      searchResult,
+      { ...searchResult, seats: roomSeats },
       task.seatPreference ?? [],
       task.strictMode ?? false,
     );
@@ -872,7 +914,7 @@ export class GrabSeatWorker {
           true,
         );
 
-        const seat = searchResult.seats.find((s) => s.id === seatId);
+        const seat = roomSeats.find((s) => s.id === seatId);
         return {
           success: true,
           bookedSeatId: seatId,
@@ -903,7 +945,7 @@ export class GrabSeatWorker {
       // 座位被占 → 实时提醒一次，然后换下一个候选座位
       // 提醒 fire-and-forget：此后还要继续尝试下一个候选座位
       if (errorCategory === ErrorCategory.SEAT_UNAVAILABLE) {
-        const takenSeat = searchResult.seats.find((s) => s.id === seatId);
+        const takenSeat = roomSeats.find((s) => s.id === seatId);
         if (takenSeat && !notifiedTakenSeats.has(seatId)) {
           notifiedTakenSeats.add(seatId);
           void this.notifySeatTaken(task, takenSeat.title, retryRound);

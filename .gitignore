@@ -9,5 +9,8 @@ frontend/node_modules/
 frontend/dist/
 *.tsbuildinfo
 
+# 服务器部署打包产物（内含真实 .env / auth.caddy，切勿提交或外发）
+server-package/
+
 # 本地数据
 *.log

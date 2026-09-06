@@ -9,5 +9,5 @@ export interface RoomConfig {
 export const ROOMS: RoomConfig[] = [
   { name: "二楼东", roomId: "1557" },
   // { name: "二楼西", roomId: "1524" },
-  // { name: "四楼", roomId: "1558" },
+  { name: "四楼", roomId: "1558" },
 ];
